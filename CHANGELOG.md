@@ -18,3 +18,4 @@ All notable changes to this project are documented here. The format follows
 - Server-side rendering: `ui.render_to_string`, `ui.page`, `ui.hydrate`, `ui.data`, the `ssr` module
   (`ssr.serve`, `ssr.template`, `ssr.isolate`), `caju-ui dev --ssr` and `caju-ui build --ssr`, and
   the `examples/ssr` app.
+- `ui.copy(text)`: copies text to the clipboard.

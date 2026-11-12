@@ -149,6 +149,7 @@ Children can be any of `*ui.Node`, `[]*ui.Node`, `str`, `int`, `num`, `bool` (re
 | `ui.use_interval(ms, f)`, `ui.set_interval`, `ui.set_timeout`, `ui.clear_timer` | timers (run by the page, delivered as events) |
 | `ui.draw_rgba(el, w, h, pixels)` | puts pixels computed in Caju into a `<canvas>` |
 | `ui.focus(el)`, `ui.cx(map[str]bool{...})` | focus an element; class names from conditions |
+| `ui.copy(text)` | copies text to the clipboard (from an event handler) |
 
 State that survives a hot reload: `use_int`, `use_str`, `use_bool`, `use_num`, and `use_state`
 holding a `str`, `int`, `num` or `bool`.

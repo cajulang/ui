@@ -236,6 +236,12 @@ describe("events", fn() {
     r.handle("e7," + str(id) + ",7:keydown3:abc0,5:Enter4:12.51:3")
     expect(got).to_equal("abc|Enter")
   })
+  it("copy text to the clipboard from a handler", fn() {
+    r, d := setup()
+    r.render(ui.h("button", []ui.Attr{ui.on("click", fn() { ui.copy("caju run x.caju") })}, nil))
+    click(r, d.root.children[0].id)
+    expect(d.copied).to_equal("caju run x.caju")
+  })
   it("report a panicking handler instead of crashing", fn() {
     r, d := setup()
     r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { panic("boom") })}, nil))

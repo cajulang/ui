@@ -36,6 +36,7 @@
 #                     M id ms rep  start a timer (rep 1: interval); C id: clear it
 #                     P id w h px  put RGBA pixels into a <canvas>
 #                     F id         focus a node
+#                     W text       copy text to the clipboard
 #                     Z json       the state snapshot asked for by a hot reload
 #                     ! text       an error to show (a panic in a component or handler)
 #   page -> program   i state data init: the components' state to restore (after a hot reload or
@@ -1399,6 +1400,13 @@ export fn draw_rgba(el: *ElementRef, w: int, h: int, pixels: str) {
   R.wi(w)
   R.wi(h)
   R.ws(pixels)
+}
+
+# copies text to the clipboard (call it from an event handler: browsers only allow it right
+# after the user does something)
+export fn copy(text: str) {
+  R.op("W")
+  R.ws(text)
 }
 
 # moves the keyboard focus to the element el refers to

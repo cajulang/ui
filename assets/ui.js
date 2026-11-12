@@ -59,6 +59,17 @@
       S(ev.key || "") + S(String(ev.clientX || 0)) + S(String(ev.clientY || 0)))
   }
 
+  function copyText(s) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(s).catch(() => {})
+    const t = document.createElement("textarea")
+    t.value = s
+    t.style.cssText = "position:fixed;opacity:0"
+    document.body.appendChild(t)
+    t.select()
+    try { document.execCommand("copy") } catch (e) {}
+    t.remove()
+  }
+
   function forget(n) {
     if (n.__uid) nodes.delete(n.__uid)
     for (let c = n.firstChild; c; c = c.nextSibling) forget(c)
@@ -245,6 +256,7 @@
         }
         case 70: { const el = nodes.get(num()); if (el && el.focus) el.focus(); break }   // F
         case 90: { const s = str(); if (snapshotWait) snapshotWait(s); break }            // Z
+        case 87: { copyText(str()); break }                                               // W
         case 33: { const s = str(); console.error(s); overlay(s); break }                 // !
         default: throw new Error("caju-ui: unknown patch op " + op + " at " + (p - 1))
       }
