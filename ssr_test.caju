@@ -32,6 +32,9 @@ describe("ui.render_to_string", fn() {
     }))
     expect(r.html).to_equal("<div title=\"a &quot;b&quot; &amp; c\" disabled>1 &lt; 2 &amp; 3<br><input value=\"x\"></div>")
   })
+  it("renders a textarea's value as its content", fn() {
+    expect(ui.render_to_string(ui.h("textarea", []ui.Attr{ui.a("value", "a < b"), ui.a("rows", 3)}, nil)).html).to_equal("<textarea rows=\"3\">a &lt; b</textarea>")
+  })
   it("separates texts in a row, so the browser keeps them as separate nodes", fn() {
     expect(ui.render_to_string(greet("ana")).html).to_equal("<p class=\"greet\">hi <!-- -->ana<!-- -->7</p>")
   })

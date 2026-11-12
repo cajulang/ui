@@ -242,6 +242,17 @@ describe("events", fn() {
     click(r, d.root.children[0].id)
     expect(d.copied).to_equal("caju run x.caju")
   })
+  it("call the page's functions and get their replies (more than one)", fn() {
+    r, d := setup()
+    got := []str{}
+    r.render(ui.h("button", []ui.Attr{ui.on("click", fn() { ui.call("run", "src", fn(s: str) { got = append(got, s) }) })}, nil))
+    click(r, d.root.children[0].id)
+    expect(d.calls).to_equal([]str{"1 run src"})
+    r.handle("c1,3:out")
+    r.handle("c1,4:exit")
+    r.handle("c9,1:x")
+    expect(got).to_equal([]str{"out", "exit"})
+  })
   it("report a panicking handler instead of crashing", fn() {
     r, d := setup()
     r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { panic("boom") })}, nil))

@@ -1,0 +1,158 @@
+# gzip: compresses text for HTTP responses (Content-Encoding: gzip), in Caju.
+#
+#   body := gzip.compress(html)
+#
+# DEFLATE (RFC 1951) with LZ77 matches over a 32 KB window (hash chains) and the fixed Huffman
+# codes, in one block, inside the gzip format (RFC 1952). Simpler than zlib's dynamic codes, so
+# it compresses a little less, but every browser reads it.
+import "std/strings"
+import "std/hash"
+
+const WINDOW = 32768
+const MIN_MATCH = 3
+const MAX_MATCH = 258
+const HASH_BITS = 15
+const MAX_CHAIN = 64
+
+let LEN_BASE = []int{3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258}
+let LEN_EXTRA = []int{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0}
+let DIST_BASE = []int{1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577}
+let DIST_EXTRA = []int{0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13}
+
+# bits, least significant first (DEFLATE's order)
+struct Bits {
+  out: *strings.Builder
+  acc: int
+  n: int
+}
+
+fn (w: *Bits) put(v: int, count: int) {
+  w.acc = w.acc | (v << w.n)
+  w.n += count
+  while w.n >= 8 {
+    w.out.write_byte(w.acc & 255)
+    w.acc = w.acc >> 8
+    w.n -= 8
+  }
+}
+
+# a Huffman code: written most significant bit first
+fn (w: *Bits) code(c: int, count: int) {
+  r := 0
+  for i := 0; i < count; i++ {
+    r = (r << 1) | ((c >> i) & 1)
+  }
+  w.put(r, count)
+}
+
+fn (w: *Bits) flush() {
+  if w.n > 0 { w.out.write_byte(w.acc & 255) }
+  w.acc = 0
+  w.n = 0
+}
+
+# a literal/length symbol with the fixed codes
+fn (w: *Bits) sym(v: int) {
+  if v < 144 {
+    w.code(0x30 + v, 8)
+  } else if v < 256 {
+    w.code(0x190 + v - 144, 9)
+  } else if v < 280 {
+    w.code(v - 256, 7)
+  } else {
+    w.code(0xC0 + v - 280, 8)
+  }
+}
+
+fn (w: *Bits) match(length: int, dist: int) {
+  i := 28
+  while LEN_BASE[i] > length { i-- }
+  w.sym(257 + i)
+  if LEN_EXTRA[i] > 0 { w.put(length - LEN_BASE[i], LEN_EXTRA[i]) }
+  d := 29
+  while DIST_BASE[d] > dist { d-- }
+  w.code(d, 5)
+  if DIST_EXTRA[d] > 0 { w.put(dist - DIST_BASE[d], DIST_EXTRA[d]) }
+}
+
+fn hash3(s: str, i: int) -> int {
+  return ((int(s[i]) << 10) ^ (int(s[i + 1]) << 5) ^ int(s[i + 2])) & ((1 << HASH_BITS) - 1)
+}
+
+# the raw DEFLATE stream of s
+export fn deflate(s: str) -> str {
+  w := &Bits{out: &strings.Builder{}}
+  w.put(1, 1)        # the last block
+  w.put(1, 2)        # fixed Huffman codes
+  n := len(s)
+  head := make([]int, 1 << HASH_BITS)
+  for k := 0; k < len(head); k++ { head[k] = -1 }
+  prev := make([]int, n + 1)
+  i := 0
+  while i < n {
+    best := 0
+    best_dist := 0
+    if i + MIN_MATCH <= n {
+      h := hash3(s, i)
+      j := head[h]
+      chain := 0
+      while j >= 0 && i - j <= WINDOW && chain < MAX_CHAIN {
+        if int(s[j + best]) == int(s[i + best]) || best == 0 {
+          k := 0
+          limit := n - i
+          if limit > MAX_MATCH { limit = MAX_MATCH }
+          while k < limit && int(s[j + k]) == int(s[i + k]) { k++ }
+          if k > best {
+            best = k
+            best_dist = i - j
+            if k == limit { break }
+          }
+        }
+        j = prev[j]
+        chain++
+      }
+      prev[i] = head[h]
+      head[h] = i
+    }
+    if best >= MIN_MATCH {
+      w.match(best, best_dist)
+      # the positions inside the match join the hash chains too
+      for k := 1; k < best; k++ {
+        p := i + k
+        if p + MIN_MATCH <= n {
+          h2 := hash3(s, p)
+          prev[p] = head[h2]
+          head[h2] = p
+        }
+      }
+      i += best
+    } else {
+      w.sym(int(s[i]))
+      i++
+    }
+  }
+  w.sym(256)
+  w.flush()
+  return w.out.string()
+}
+
+fn le32(b: *strings.Builder, v: int) {
+  b.write_byte(v & 255)
+  b.write_byte((v >> 8) & 255)
+  b.write_byte((v >> 16) & 255)
+  b.write_byte((v >> 24) & 255)
+}
+
+# s in the gzip format
+export fn compress(s: str) -> str {
+  b := &strings.Builder{}
+  # magic, deflate, no flags, no time, no extra flags, Unix
+  for _, c := range []int{0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3} { b.write_byte(c) }
+  b.write(deflate(s))
+  le32(b, hash.crc32(s) & 0xFFFFFFFF)
+  le32(b, len(s) & 0xFFFFFFFF)
+  return b.string()
+}
+
+# whether a request's Accept-Encoding allows gzip
+export fn accepted(accept_encoding: str) -> bool { return strings.contains(strings.to_lower(accept_encoding), "gzip") }

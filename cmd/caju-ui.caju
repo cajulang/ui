@@ -172,7 +172,7 @@ fn index_html(dir: str, cfg: str, base: str) -> str {
     title := filepath.base(os.getwd())
     page = "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>" + title + "</title>\n" + links + "</head>\n<body>\n  <div id=\"app\"></div>\n</body>\n</html>\n"
   }
-  scripts := "<script>window.__UI__ = " + cfg + "</script>\n<script src=\"" + base + "__ui/ui.js\"></script>\n"
+  scripts := "<script>window.__UI__ = " + cfg + "</script>\n<script src=\"" + base + "__ui/ui.js\" defer></script>\n"
   i := strings.last_index(page, "</body>")
   if i < 0 { return page + scripts }
   return page[0:i] + scripts + page[i:]
@@ -500,8 +500,11 @@ fn cmd_build(m: *cli.Match) {
       fs.copy_file(filepath.join("public", f), filepath.join(out, f))
     }
   }
-  cfg, _ := json.marshal(map[str]any{"dev": false, "wasm": "__ui/app.wasm", "worker": "__ui/worker.js"})
-  fs.write_file(filepath.join(out, "index.html"), index_html(dir, cfg, ""), 420)
+  # absolute paths, so pages at any depth (/en/docs) find the runtime; --base for a subpath
+  base := m.str("base")
+  if !strings.has_suffix(base, "/") { base = base + "/" }
+  cfg, _ := json.marshal(map[str]any{"dev": false, "wasm": base + "__ui/app.wasm", "worker": base + "__ui/worker.js"})
+  fs.write_file(filepath.join(out, "index.html"), index_html(dir, cfg, base), 420)
   # the headers the page needs (SharedArrayBuffer), for hosts that read these files
   fs.write_file(filepath.join(out, "_headers"), "/*\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n", 420)
   fs.write_file(filepath.join(out, "vercel.json"), "{\n  \"headers\": [{\n    \"source\": \"/(.*)\",\n    \"headers\": [\n      { \"key\": \"Cross-Origin-Opener-Policy\", \"value\": \"same-origin\" },\n      { \"key\": \"Cross-Origin-Embedder-Policy\", \"value\": \"require-corp\" }\n    ]\n  }]\n}\n", 420)
@@ -510,8 +513,10 @@ fn cmd_build(m: *cli.Match) {
   ssr := m.str("ssr")
   if ssr != "" {
     bin := filepath.stem(ssr)
-    serr := build_server(dir, ssr, bin)
+    # built aside and renamed over it (the server may be running)
+    serr := build_server(dir, ssr, bin + ".new")
     if serr != "" { die("server build failed\n" + serr) }
+    fs.rename(bin + ".new", bin)
     print("built ./" + bin + " (the server: UI_DIST=" + out + " ./" + bin + ")")
   }
 }
@@ -573,6 +578,7 @@ build_cmd := app.sub("build", "build a static site")
 build_cmd.arg_opt("entry", "the entry file (default: main.cajux)")
 build_cmd.flag_str("out", "o", "dir", "dist", "the output directory")
 build_cmd.flag_str("ssr", "", "file", "", "also compile this server program (native)")
+build_cmd.flag_str("base", "", "path", "/", "the path the site is served under")
 build_cmd.action(cmd_build)
 
 preview_cmd := app.sub("preview", "serve a build")

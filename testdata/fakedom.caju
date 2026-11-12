@@ -22,6 +22,7 @@ export struct Dom {
   snapshot: str
   seq: int
   copied: str
+  calls: []str
 }
 
 export fn new_dom() -> *Dom {
@@ -177,6 +178,10 @@ export fn (d: *Dom) apply(batch: str) {
       r.str_()
     case "F": r.n()
     case "W": d.copied = r.str_()
+    case "J":
+      id := r.n()
+      name := r.str_()
+      d.calls = append(d.calls, str(id) + " " + name + " " + r.str_())
     case "Z": d.snapshot = r.str_()
     case "!": d.errors = append(d.errors, r.str_())
     default: panic("fakedom: unknown op " + op)

@@ -106,6 +106,7 @@ UI_DIST=dist ./server              # serves dist/ and renders every page
 | `ui.data()` | in the browser: the `data` the server passed to `ui.page` |
 | `ssr.serve(host, port, page)` | serves the build's files and, for other paths, `page(req)` (`""` is a 404); `PORT`, `UI_DIST`, `UI_TEMPLATE` override |
 | `ssr.template()`, `ssr.isolate(res)` | the page template; the headers every response needs (for your own `std/http` or `web` server) |
+| `gzip.compress(s)`, `gzip.accepted(h)` | `import "github.com/aecdanjundex/ui/gzip"`: DEFLATE/gzip in Caju for `Content-Encoding: gzip` responses (fixed Huffman codes: about 20% larger than `gzip -9`) |
 
 How hydration works: the server separates adjacent texts with `<!-- -->` (so the browser keeps them
 apart), and the client, instead of creating nodes, claims the next child of each parent (ops `h`
@@ -150,6 +151,7 @@ Children can be any of `*ui.Node`, `[]*ui.Node`, `str`, `int`, `num`, `bool` (re
 | `ui.draw_rgba(el, w, h, pixels)` | puts pixels computed in Caju into a `<canvas>` |
 | `ui.focus(el)`, `ui.cx(map[str]bool{...})` | focus an element; class names from conditions |
 | `ui.copy(text)` | copies text to the clipboard (from an event handler) |
+| `ui.call(name, arg, fn(reply: str) {...})` | calls `window.__UI_FNS__[name](arg, reply)` on the page, for browser APIs the worker lacks (storage, history, cookies, other workers); every `reply(text)` runs the callback |
 
 State that survives a hot reload: `use_int`, `use_str`, `use_bool`, `use_num`, and `use_state`
 holding a `str`, `int`, `num` or `bool`.

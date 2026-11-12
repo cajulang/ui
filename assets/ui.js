@@ -257,6 +257,18 @@
         case 70: { const el = nodes.get(num()); if (el && el.focus) el.focus(); break }   // F
         case 90: { const s = str(); if (snapshotWait) snapshotWait(s); break }            // Z
         case 87: { copyText(str()); break }                                               // W
+        case 74: {                                                                         // J
+          const id = num(), name = str(), arg = str()
+          const fn = (window.__UI_FNS__ || {})[name]
+          if (!fn) { console.error("caju-ui: ui.call: no page function " + name + " (window.__UI_FNS__)"); break }
+          const reply = (v) => send("c" + id + "," + S(String(v)))
+          try {
+            const r = fn(arg, reply)
+            if (r && typeof r.then === "function") r.then((v) => { if (v !== undefined) reply(v) }, (e) => console.error(e))
+            else if (r !== undefined) reply(r)
+          } catch (e) { console.error(e) }
+          break
+        }
         case 33: { const s = str(); console.error(s); overlay(s); break }                 // !
         default: throw new Error("caju-ui: unknown patch op " + op + " at " + (p - 1))
       }

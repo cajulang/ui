@@ -37,6 +37,7 @@
 #                     P id w h px  put RGBA pixels into a <canvas>
 #                     F id         focus a node
 #                     W text       copy text to the clipboard
+#                     J id fn arg  call the page's function fn (window.__UI_FNS__[fn](arg, reply))
 #                     Z json       the state snapshot asked for by a hot reload
 #                     ! text       an error to show (a panic in a component or handler)
 #   page -> program   i state data init: the components' state to restore (after a hot reload or
@@ -44,6 +45,7 @@
 #                     e seq id type value checked key x y   a DOM event
 #                     t id         a timer fired
 #                     s            take a state snapshot (a hot reload is coming)
+#                     c id text    a reply of the page's function called with J id
 
 import "std/os"
 import "std/strings"
@@ -289,6 +291,8 @@ export struct Renderer {
   selector: str
   adopted: bool
   hydrating: bool               # claiming the DOM the server rendered instead of creating it
+  calls: map[int]fn(str)        # the callbacks of ui.call, by call id
+  next_call: int
   server: bool                  # rendering to a string: no effects, no timers
 }
 
@@ -1095,6 +1099,9 @@ export fn (r: *Renderer) handle(data: str) {
     } else if k == 's' {
       r.op("Z")
       r.ws(r.snapshot())
+    } else if k == 'c' {
+      id := rd.num_()
+      r.reply(id, rd.str_())
     } else if k == 'i' {
       st := rd.str_()
       page_data = rd.str_()
@@ -1409,6 +1416,33 @@ export fn copy(text: str) {
   R.ws(text)
 }
 
+# calls a function of the page: window.__UI_FNS__[name](arg, reply), for what only the page can do
+# (the browser's APIs: storage, history, cookies, other workers...). Each reply(text) the page
+# makes runs cb with it (cb nil: no reply wanted). Does nothing on the server
+export fn call(name: str, arg: str, cb: fn(str)) {
+  if R.server { return }
+  if R.calls == nil { R.calls = map[int]fn(str){} }
+  R.next_call++
+  id := R.next_call
+  if cb != nil { R.calls[id] = cb }
+  R.op("J")
+  R.wi(id)
+  R.ws(name)
+  R.ws(arg)
+}
+
+fn (r: *Renderer) reply(id: int, text: str) {
+  R = r
+  if r.calls == nil { return }
+  cb, ok := r.calls[id]
+  if !ok { return }
+  defer fn() {
+    x := recover()
+    if x != nil { r.fail("ui.call reply", x) }
+  }()
+  cb(text)
+}
+
 # moves the keyboard focus to the element el refers to
 export fn focus(el: *ElementRef) {
   if el == nil || el.id == 0 { return }
@@ -1568,9 +1602,15 @@ fn (r: *Renderer) html(v: *Node, w: *Html) {
     w.text = false
     w.b.write("<")
     w.b.write(v.tag)
+    content := ""
     for i := 0; i < len(v.attrs); i++ {
       at := &v.attrs[i]
       if at.kind != A_ATTR || !at.on { continue }
+      # a <textarea>'s value is its content
+      if v.tag == "textarea" && at.name == "value" {
+        content = at.val
+        continue
+      }
       w.b.write(" ")
       w.b.write(at.name)
       if at.val != "" {
@@ -1581,6 +1621,7 @@ fn (r: *Renderer) html(v: *Node, w: *Html) {
     }
     w.b.write(">")
     if strings.contains(VOID, " " + v.tag + " ") { return }
+    if content != "" { w.b.write(escape(content, false)) }
     for i := 0; i < len(v.children); i++ { r.html(r.prepare(v, i), w) }
     w.b.write("</")
     w.b.write(v.tag)

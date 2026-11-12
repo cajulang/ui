@@ -1,0 +1,25 @@
+import { describe, it, expect } from "std/testing"
+import "std/strings"
+import "std/hash"
+import "gzip"
+
+describe("gzip.compress", fn() {
+  it("writes the gzip header and the trailer (CRC-32 and size)", fn() {
+    z := gzip.compress("hello")
+    expect(int(z[0])).to_equal(0x1f)
+    expect(int(z[1])).to_equal(0x8b)
+    expect(int(z[2])).to_equal(8)
+    n := len(z)
+    crc := int(z[n - 8]) | (int(z[n - 7]) << 8) | (int(z[n - 6]) << 16) | (int(z[n - 5]) << 24)
+    expect(crc).to_equal(hash.crc32("hello") & 0xFFFFFFFF)
+    expect(int(z[n - 4])).to_equal(5)
+  })
+  it("compresses repeated text", fn() {
+    s := strings.repeat("<div class=\"card\">caju</div>", 400)
+    expect(len(gzip.compress(s)) < len(s) / 10).to_equal(true)
+  })
+  it("knows when a client takes gzip", fn() {
+    expect(gzip.accepted("gzip, deflate, br")).to_equal(true)
+    expect(gzip.accepted("identity")).to_equal(false)
+  })
+})
