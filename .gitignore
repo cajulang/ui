@@ -1,0 +1,12 @@
+build/
+dist/
+.ui/
+# generated from .cajux files
+examples/**/*.caju
+!examples/**/*_test.caju
+bench/node_modules/
+bench/*/dist/
+bench/results.json
+bench/caju/app.caju
+bench/caju/main.caju
+examples/ssr/server

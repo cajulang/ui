@@ -1,0 +1,79 @@
+# The Mandelbrot set, computed in WebAssembly (in the worker, so the page never freezes) and
+# drawn into a <canvas>. Click a point to zoom in on it.
+# Run it with: cd examples/mandelbrot && caju-ui dev
+import ui "../../ui"
+import "std/strings"
+import "std/os"
+
+const W = 480
+const H = 320
+
+# the RGBA pixels of the view centered at (cx, cy), scale units per pixel
+fn render(cx: num, cy: num, scale: num, iters: int) -> str {
+  b := strings.Builder{}
+  for py := 0; py < H; py++ {
+    y0 := cy + num(py - H / 2) * scale
+    for px := 0; px < W; px++ {
+      x0 := cx + num(px - W / 2) * scale
+      let x = 0.0
+      let y = 0.0
+      i := 0
+      while i < iters && x * x + y * y <= 4.0 {
+        xt := x * x - y * y + x0
+        y = 2.0 * x * y + y0
+        x = xt
+        i++
+      }
+      if i == iters {
+        b.write_byte(20)
+        b.write_byte(10)
+        b.write_byte(5)
+      } else {
+        t := num(i) / num(iters)
+        b.write_byte(int(255.0 * t * 4.0) % 256)
+        b.write_byte(int(105.0 + 150.0 * t) % 256)
+        b.write_byte(int(43.0 + 200.0 * (1.0 - t)) % 256)
+      }
+      b.write_byte(255)
+    }
+  }
+  return b.string()
+}
+
+fn App() -> *ui.Node {
+  canvas := ui.use_element()
+  zoom := ui.use_int(0)
+  cx := ui.use_num(-0.6)
+  cy := ui.use_num(0.0)
+  iters := ui.use_int(120)
+  ms := ui.use_int(0)
+  let scale = 3.2 / num(W)
+  for k := 0; k < zoom.v; k++ { scale = scale / 2.0 }
+
+  ui.use_effect(fn() -> fn() {
+    t0 := os.nanotime()
+    ui.draw_rgba(canvas, W, H, render(cx.v, cy.v, scale, iters.v))
+    ms.set((os.nanotime() - t0) / 1000000)
+    return nil
+  }, []any{zoom.v, cx.v, cy.v, iters.v})
+
+  pick := fn(e: *ui.Event) {
+    # e.x and e.y are page coordinates; the canvas sits at the top-left of .frame
+    cx.set(cx.v + (e.x - 16.0 - num(W) / 2.0) * scale)
+    cy.set(cy.v + (e.y - 16.0 - num(H) / 2.0) * scale)
+    zoom.set(zoom.v + 1)
+  }
+
+  return (
+    <div class="frame">
+      <canvas ref={canvas} width={W} height={H} onClick={pick} />
+      <p>
+        zoom 2<sup>{zoom.v}</sup> · {iters.v} iterations · {W * H} pixels in {ms.v} ms
+      </p>
+      <button onClick={fn() { iters.set(iters.v + 100) }}>more detail</button>
+      <button onClick={fn() { zoom.set(0); cx.set(-0.6); cy.set(0.0) }}>reset</button>
+    </div>
+  )
+}
+
+ui.mount("#app", <App />)

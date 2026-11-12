@@ -1,0 +1,92 @@
+# A to-do list: components with props, a keyed list, a form, a context.
+# Run it with: cd examples/todo && caju-ui dev
+import ui "../../ui"
+
+struct Todo {
+  id: int
+  text: str
+  done: bool
+}
+
+let accent = ui.create_context("#e8692b")
+
+struct ItemProps {
+  todo: Todo
+  onToggle: fn(int)
+  onRemove: fn(int)
+}
+
+fn Item(p: ItemProps) -> *ui.Node {
+  color := ui.use_context(accent).(str)
+  t := p.todo
+  return (
+    <li class={ui.cx(map[str]bool{"item": true, "done": t.done})}>
+      <input type="checkbox" checked={t.done} onChange={fn() { p.onToggle(t.id) }} />
+      <span style={"border-color: " + color}>{t.text}</span>
+      <button class="remove" onClick={fn() { p.onRemove(t.id) }}>×</button>
+    </li>
+  )
+}
+
+fn App() -> *ui.Node {
+  todos := ui.use_state([]Todo{Todo{1, "Write components in .cajux", true}, Todo{2, "Save and watch the hot reload", false}})
+  draft := ui.use_str("")
+  next := ui.use_int(3)
+  filter := ui.use_str("all")
+  list := todos.v.([]Todo)
+
+  add := fn() {
+    if draft.v == "" { return }
+    todos.set(append(list, Todo{next.v, draft.v, false}))
+    next.set(next.v + 1)
+    draft.set("")
+  }
+  toggle := fn(id: int) {
+    out := []Todo{}
+    for _, t := range list {
+      if t.id == id { t.done = !t.done }
+      out = append(out, t)
+    }
+    todos.set(out)
+  }
+  remove := fn(id: int) {
+    out := []Todo{}
+    for _, t := range list {
+      if t.id != id { out = append(out, t) }
+    }
+    todos.set(out)
+  }
+
+  items := []*ui.Node{}
+  left := 0
+  for _, t := range list {
+    if !t.done { left++ }
+    if filter.v == "open" && t.done { continue }
+    if filter.v == "done" && !t.done { continue }
+    items = append(items, <Item key={t.id} todo={t} onToggle={toggle} onRemove={remove} />)
+  }
+
+  return (
+    <ui.Provider ctx={accent} value={"#e8692b"}>
+      <main class="todo">
+        <h1>to-do</h1>
+        <form onSubmit={add}>
+          <input placeholder="What needs doing?" value={draft.v}
+            onInput={fn(e: *ui.Event) { draft.set(e.value) }} />
+          <button type="submit">add</button>
+        </form>
+        <ul>{items}</ul>
+        <footer>
+          <span>{left} left</span>
+          {ui.each(3, fn(i: int) -> *ui.Node {
+            name := []str{"all", "open", "done"}[i]
+            return <button class={ui.cx(map[str]bool{"tab": true, "on": filter.v == name})}
+              onClick={fn() { filter.set(name) }}>{name}</button>
+          })}
+        </footer>
+      </main>
+    </ui.Provider>
+  )
+}
+
+ui.mount("#app", <App />)

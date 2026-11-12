@@ -1,0 +1,5 @@
+# The benchmark app (app.cajux), mounted on the page.
+import ui "../../ui"
+import "./app"
+
+ui.mount("#main", <app.App />)

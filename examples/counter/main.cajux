@@ -1,0 +1,40 @@
+# A counter: state, events and an effect. Run it with: cd examples/counter && caju-ui dev
+import ui "../../ui"
+
+fn Counter() -> *ui.Node {
+  count := ui.use_int(0)
+  step := ui.use_int(1)
+
+  ui.use_effect(fn() -> fn() {
+    print("count is now", count.v)
+    return nil
+  }, []any{count.v})
+
+  return (
+    <div class="counter">
+      <h1>{count.v}</h1>
+      <div class="row">
+        <button onClick={fn() { count.set(count.v - step.v) }}>−</button>
+        <button onClick={fn() { count.set(count.v + step.v) }}>+</button>
+      </div>
+      <label>
+        step
+        <input type="number" min="1" value={step.v}
+          onInput={fn(e: *ui.Event) { step.set(atoi(e.value)) }} />
+      </label>
+      <button class="link" onClick={fn() { count.set(0) }}>reset</button>
+    </div>
+  )
+}
+
+fn atoi(s: str) -> int {
+  n := 0
+  for i := 0; i < len(s); i++ {
+    c := int(s[i])
+    if c >= '0' && c <= '9' { n = n * 10 + c - '0' }
+  }
+  if n < 1 { return 1 }
+  return n
+}
+
+ui.mount("#app", <Counter />)

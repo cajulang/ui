@@ -1,0 +1,37 @@
+# The server: renders each page natively and serves the build.
+#   development: caju-ui dev --ssr server.cajux
+#   production:  caju-ui build --ssr server.cajux && ./server
+import ui "../../ui"
+import "../../ssr"
+import "std/http"
+import "std/json"
+import "std/strings"
+import "std/os"
+import "./app"
+
+let catalog = []app.Product{
+  app.Product{1, "Cashew juice", 9},
+  app.Product{2, "Roasted cashew nuts", 24},
+  app.Product{3, "Cashew jam", 18},
+  app.Product{4, "Cajuína", 12},
+  app.Product{5, "Cashew ice cream", 15},
+  app.Product{6, "Salted cashews", 21},
+}
+
+fn param(query: str, name: str) -> str {
+  for _, kv := range strings.split(query, "&") {
+    if strings.has_prefix(kv, name + "=") { return strings.replace_all(kv[len(name) + 1:], "+", " ") }
+  }
+  return ""
+}
+
+err := ssr.serve("127.0.0.1", 8080, fn(req: *http.Request) -> str {
+  if req.path != "/" { return "" }
+  props := app.AppProps{products: catalog, query: param(req.query, "q")}
+  data, _ := json.marshal(props)
+  return ui.page(ssr.template(), "#app", <app.App products={props.products} query={props.query} />, data)
+})
+if err != nil {
+  os.eprintln("server: " + err.Error())
+  os.exit(1)
+}

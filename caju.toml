@@ -1,0 +1,8 @@
+[package]
+name = "github.com/aecdanjundex/ui"
+version = "0.1.0"
+description = "A React-style UI library for Caju: JSX-like components rendered from WebAssembly, with hot reload"
+license = "MIT"
+authors = ["Aécio"]
+entry = "ui.caju"
+caju = "0.5.0"

@@ -1,0 +1,79 @@
+import { describe, it, expect } from "std/testing"
+import "std/strings"
+import "ui"
+import "./testdata/fakedom"
+
+struct GreetProps {
+  name: str
+}
+fn Greet(p: GreetProps) -> *ui.Node {
+  n := ui.use_int(7)
+  ui.use_effect(fn() -> fn() {
+    panic("effects must not run on the server")
+    return nil
+  }, []any{})
+  ui.use_interval(10, fn() {})
+  return ui.h("p", []ui.Attr{ui.a("class", "greet"), ui.on("click", fn() { n.set(n.v + 1) })}, []*ui.Node{
+    ui.text("hi "),
+    ui.text(p.name),
+    ui.child(n.v),
+  })
+}
+fn greet(name: str) -> *ui.Node {
+  return ui.c("Greet", fn(p: any) -> *ui.Node { return Greet(p.(GreetProps)) }, GreetProps{name: name})
+}
+
+describe("ui.render_to_string", fn() {
+  it("renders elements, attributes and escaped text", fn() {
+    r := ui.render_to_string(ui.h("div", []ui.Attr{ui.a("title", "a \"b\" & c"), ui.a("hidden", false), ui.a("disabled", true), ui.a("key", 1), ui.on("click", fn() {})}, []*ui.Node{
+      ui.text("1 < 2 & 3"),
+      ui.h("br", nil, nil),
+      ui.h("input", []ui.Attr{ui.a("value", "x")}, nil),
+    }))
+    expect(r.html).to_equal("<div title=\"a &quot;b&quot; &amp; c\" disabled>1 &lt; 2 &amp; 3<br><input value=\"x\"></div>")
+  })
+  it("separates texts in a row, so the browser keeps them as separate nodes", fn() {
+    expect(ui.render_to_string(greet("ana")).html).to_equal("<p class=\"greet\">hi <!-- -->ana<!-- -->7</p>")
+  })
+  it("runs components and hooks but not effects or timers, and returns their state", fn() {
+    r := ui.render_to_string(ui.h("main", nil, []*ui.Node{greet("bia")}))
+    expect(r.state).to_equal("{\"0:main/0:Greet\":[7,null,null,null]}")
+  })
+})
+
+describe("ui.page", fn() {
+  it("puts the HTML in the container and the state and data before the runtime", fn() {
+    tpl := "<html><body>\n<div id=\"app\"></div>\n<script>window.__UI__ = {}</script>\n</body></html>"
+    out := ui.page(tpl, "#app", greet("c"), "{\"x\":\"</script>\"}")
+    expect(strings.contains(out, "<div id=\"app\"><p class=\"greet\">hi <!-- -->c<!-- -->7</p></div>")).to_equal(true)
+    expect(strings.contains(out, "<script type=\"application/json\" id=\"__ui_data\">{\"x\":\"\\u003c/script>\"}</script>\n<script>window.__UI__")).to_equal(true)
+    expect(strings.contains(out, "id=\"__ui_state\">{\"0:Greet\":[7,null,null,null]}</script>")).to_equal(true)
+  })
+})
+
+describe("hydration", fn() {
+  it("claims the server's nodes instead of creating them, and adds the listeners (attributes are sent too: the page only writes the ones that differ)", fn() {
+    d := fakedom.new_dom()
+    r := ui.new_renderer("#app", fn(b: str) { d.apply(b) })
+    r.handle("i0:3:abc")
+    expect(ui.data()).to_equal("abc")
+    r.hydrate(greet("ana"))
+    expect(d.last["e"] + d.last["x"] + d.last["E"] + d.last["X"]).to_equal(0)
+    expect(d.last["S"]).to_equal(1)
+    expect(d.last["h"]).to_equal(1)
+    expect(d.last["j"]).to_equal(3)
+    expect(d.last["L"]).to_equal(1)
+    r.dispatch(d.root.children[0].id, &ui.Event{type: "click"})
+    r.work()
+    expect(d.html()).to_equal("<p class=\"greet\">hi ana8</p>")
+  })
+  it("starts from the state the server rendered", fn() {
+    srv := ui.render_to_string(greet("x"))
+    d := fakedom.new_dom()
+    r := ui.new_renderer("#app", fn(b: str) { d.apply(b) })
+    st := strings.replace_all(srv.state, "7", "41")
+    r.handle("i" + str(len(st)) + ":" + st + "0:")
+    r.hydrate(greet("x"))
+    expect(d.html()).to_equal("<p class=\"greet\">hi x41</p>")
+  })
+})

@@ -1,0 +1,570 @@
+# jsx: turns a .cajux file (Caju with JSX-like elements) into plain Caju that calls the ui package.
+#
+#   <div class="box" onClick={fn() { n.set(n.v + 1) }}>clicked {n.v} times</div>
+#
+# becomes
+#
+#   ui.h("div", []ui.Attr{ui.a("class", "box"), ui.on("click", fn() { n.set(n.v + 1) }), }, []*ui.Node{ui.text("clicked "), ui.child(n.v), ui.text(" times"), }, )
+#
+# The output keeps every line where it was (line breaks go after commas, where Caju allows them),
+# so an error the compiler reports on line N of the .caju file is on line N of the .cajux file.
+#
+# Elements: a lower-case tag is a DOM element; a capitalized or qualified tag (Card, cards.Card) is
+# a component: a function Card(p: CardProps) -> *ui.Node whose props struct gets one field per
+# attribute (and children: []*ui.Node for the nested elements), or Card() -> *ui.Node when it takes
+# no props. <ui.Provider ctx={c} value={v}> gives a context value to the elements inside it.
+#
+# Attributes: name="text", name={expression}, name (true). onX={handler} listens to the DOM event
+# "x" (onClick -> "click", onKeyDown -> "keydown"); onSubmit:prevent / onClick:stop add modifiers.
+# key={k} identifies a node among its siblings; ref={r} gives an element to a ui.use_element().
+#
+# Children: text (whitespace handled as in JSX), {expression} (a *ui.Node, []*ui.Node, str, int,
+# num, bool or nil), nested elements, <>fragments</>, and {/* comments */}.
+import "std/strings"
+
+export struct JsxError {
+  file: str
+  line: int
+  msg: str
+}
+export fn (e: *JsxError) Error() -> str { return e.file + ", line " + str(e.line) + ": " + e.msg }
+
+struct T {
+  src: str
+  pos: int
+  file: str
+  zero: map[str]bool
+  starts: []int
+  err: str
+  err_pos: int
+}
+
+struct Item {
+  line: int
+  name: str
+  code: str
+  is_event: bool
+  mods: str
+}
+
+# transpiles src (the contents of file). zero names the components that take no props ("App",
+# "cards.Card"), which the caller collects with components()
+export fn transpile(src: str, file: str, zero: map[str]bool) -> (str, error) {
+  t := &T{src: src, file: file, zero: zero}
+  t.starts = []int{0}
+  for i := 0; i < len(src); i++ {
+    if int(src[i]) == 10 { t.starts = append(t.starts, i + 1) }
+  }
+  out := t.code(false)
+  if t.err != "" { return "", &JsxError{file: file, line: t.line_at(t.err_pos), msg: t.err} }
+  return out, nil
+}
+
+# the components declared in src that take no props: fn Name() -> ...
+export fn components(src: str, module: str, zero: map[str]bool) {
+  for _, line := range strings.split(src, "\n") {
+    s := strings.trim_space(line)
+    s = strings.trim_prefix(s, "export ")
+    if !strings.has_prefix(s, "fn ") { continue }
+    s = strings.trim_space(s[3:])
+    i := 0
+    while i < len(s) && is_ident(int(s[i])) { i++ }
+    if i == 0 { continue }
+    name := s[0:i]
+    rest := strings.trim_space(s[i:])
+    if !is_upper(int(name[0])) { continue }
+    if strings.has_prefix(rest, "()") {
+      zero[name] = true
+      if module != "" { zero[module + "." + name] = true }
+    }
+  }
+}
+
+fn (t: *T) line_at(pos: int) -> int {
+  lo := 0
+  hi := len(t.starts) - 1
+  while lo < hi {
+    mid := (lo + hi + 1) / 2
+    if t.starts[mid] <= pos { lo = mid } else { hi = mid - 1 }
+  }
+  return lo + 1
+}
+
+fn (t: *T) fail(msg: str, pos: int) {
+  if t.err == "" {
+    t.err = msg
+    t.err_pos = pos
+  }
+}
+
+fn is_ident(c: int) -> bool {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 128
+}
+fn is_letter(c: int) -> bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
+fn is_upper(c: int) -> bool { return c >= 'A' && c <= 'Z' }
+fn is_ws(c: int) -> bool { return c == 32 || c == 9 || c == 10 || c == 13 }
+
+fn (t: *T) at(i: int) -> int {
+  if i < len(t.src) { return int(t.src[i]) }
+  return 0
+}
+
+# copies Caju code, replacing the JSX in it. With in_brace, stops before the "}" that closes the
+# expression (and leaves out comments, which could swallow the comma that follows it)
+fn (t: *T) code(in_brace: bool) -> str {
+  b := &strings.Builder{}
+  depth := 0
+  last := 0
+  word := ""
+  start := t.pos
+  while t.pos < len(t.src) && t.err == "" {
+    c := t.at(t.pos)
+    if c == '#' || (c == '/' && t.at(t.pos + 1) == '/') {
+      s := t.pos
+      while t.pos < len(t.src) && t.at(t.pos) != 10 { t.pos++ }
+      if !in_brace { b.write(t.src[s:t.pos]) }
+      continue
+    }
+    if c == '"' || c == '\'' {
+      s := t.pos
+      t.pos++
+      while t.pos < len(t.src) && t.at(t.pos) != c && t.at(t.pos) != 10 {
+        if t.at(t.pos) == '\\' { t.pos++ }
+        t.pos++
+      }
+      t.pos++
+      b.write(t.src[s:t.pos])
+      last = '"'
+      word = ""
+      continue
+    }
+    if c == '`' {
+      s := t.pos
+      t.pos++
+      while t.pos < len(t.src) && t.at(t.pos) != '`' { t.pos++ }
+      t.pos++
+      b.write(t.src[s:t.pos])
+      last = '"'
+      word = ""
+      continue
+    }
+    if c == '{' { depth++ }
+    if c == '}' {
+      if depth == 0 && in_brace { return b.string() }
+      depth--
+    }
+    # "(" and a line break before an element: Caju allows no line break after "(" there, so the
+    # element starts on the line of the "(" (its pieces still go to their own lines)
+    line0 := t.line_at(t.pos)
+    if c == '(' {
+      j := t.pos + 1
+      while j < len(t.src) && is_ws(t.at(j)) { j++ }
+      if j > t.pos + 1 && t.at(j) == '<' && (is_letter(t.at(j + 1)) || t.at(j + 1) == '>') {
+        b.write("(")
+        t.pos = j
+        c = '<'
+        last = '('
+        word = ""
+      }
+    }
+    if c == '<' && (is_letter(t.at(t.pos + 1)) || t.at(t.pos + 1) == '>') && starts_expr(last, word) {
+      b.write(t.node(line0))
+      # "(\n <div/>\n)": a line break before ")" would end the statement there, so the ")" moves
+      # up next to the element and the line breaks go after it
+      j := t.pos
+      while j < len(t.src) && is_ws(t.at(j)) { j++ }
+      if j > t.pos && t.at(j) == ')' {
+        b.write(")")
+        b.write(t.src[t.pos:j])
+        t.pos = j + 1
+      }
+      last = ')'
+      word = ""
+      continue
+    }
+    if is_ident(c) {
+      s := t.pos
+      while t.pos < len(t.src) && is_ident(t.at(t.pos)) { t.pos++ }
+      word = t.src[s:t.pos]
+      b.write(word)
+      last = 'a'
+      continue
+    }
+    b.write(t.src[t.pos:t.pos + 1])
+    if !is_ws(c) {
+      last = c
+      word = ""
+    }
+    t.pos++
+  }
+  if in_brace && t.err == "" { t.fail("this { is never closed", start - 1) }
+  return b.string()
+}
+
+# whether a "<" here starts an element (and is not "less than")
+fn starts_expr(last: int, word: str) -> bool {
+  if word == "return" { return true }
+  return last == 0 || last == '(' || last == ',' || last == '=' || last == ':' || last == '{' || last == '[' || last == ';'
+}
+
+fn (t: *T) skip_ws() {
+  while t.pos < len(t.src) && is_ws(t.at(t.pos)) { t.pos++ }
+}
+
+fn (t: *T) tag_name() -> str {
+  s := t.pos
+  while t.pos < len(t.src) {
+    c := t.at(t.pos)
+    if !(is_ident(c) || c == '.' || c == '-' || c == ':') { break }
+    t.pos++
+  }
+  return t.src[s:t.pos]
+}
+
+# {expression}: the expression's code without the braces and surrounding spaces, and its line
+fn (t: *T) expr() -> (str, int) {
+  open := t.pos
+  t.pos++
+  code := t.code(true)
+  if t.err != "" { return "", 0 }
+  t.pos++
+  lead := 0
+  while lead < len(code) && is_ws(int(code[lead])) { lead++ }
+  line := t.line_at(open) + strings.count(code[0:lead], "\n")
+  return strings.trim_space(code), line
+}
+
+# an element or fragment at t.pos (a "<"), as code that starts on line0 and ends on the line
+# where the element ends
+fn (t: *T) node(line0: int) -> str {
+  open := t.pos
+  t.pos++
+  if t.at(t.pos) == '>' {
+    t.pos++
+    kids := t.children("", open)
+    if t.err != "" { return "" }
+    g := &Gen{b: &strings.Builder{}, line: line0, t: t}
+    g.w("ui.frag(")
+    g.list(kids)
+    g.w(",")
+    g.pad(t.line_at(t.pos - 1))
+    g.w(")")
+    return g.b.string()
+  }
+  name := t.tag_name()
+  attrs := []Item{}
+  self_closing := false
+  while t.err == "" {
+    t.skip_ws()
+    c := t.at(t.pos)
+    if c == 0 {
+      t.fail("<" + name + "> is never closed", open)
+      return ""
+    }
+    if c == '/' && t.at(t.pos + 1) == '>' {
+      t.pos += 2
+      self_closing = true
+      break
+    }
+    if c == '>' {
+      t.pos++
+      break
+    }
+    if c == '{' {
+      t.fail("spread attributes ({...x}) are not supported", t.pos)
+      return ""
+    }
+    apos := t.pos
+    aname := t.tag_name()
+    if aname == "" {
+      t.fail("unexpected character in <" + name + ">", t.pos)
+      return ""
+    }
+    it := Item{line: t.line_at(apos), name: aname, code: "true"}
+    t.skip_ws()
+    if t.at(t.pos) == '=' {
+      t.pos++
+      t.skip_ws()
+      q := t.at(t.pos)
+      if q == '"' || q == '\'' {
+        s := t.pos + 1
+        t.pos++
+        while t.pos < len(t.src) && t.at(t.pos) != q { t.pos++ }
+        it.code = quote(unescape(t.src[s:t.pos]))
+        t.pos++
+      } else if q == '{' {
+        code, line := t.expr()
+        if t.err != "" { return "" }
+        if code == "" {
+          t.fail("empty expression for " + aname, apos)
+          return ""
+        }
+        it.code = code
+        it.line = line
+      } else {
+        t.fail("the value of " + aname + " must be \"text\" or {expression}", t.pos)
+        return ""
+      }
+    }
+    event_name(&it)
+    attrs = append(attrs, it)
+  }
+  if t.err != "" { return "" }
+  kids := []Item{}
+  if !self_closing {
+    kids = t.children(name, open)
+    if t.err != "" { return "" }
+  }
+  end := t.line_at(t.pos - 1)
+  g := &Gen{b: &strings.Builder{}, line: line0, t: t}
+  if is_upper(int(name[0])) || strings.contains(name, ".") {
+    t.component(g, name, attrs, kids, end, open)
+  } else {
+    g.w("ui.h(" + quote(name) + ", ")
+    if len(attrs) == 0 { g.w("nil") } else {
+      g.w("[]ui.Attr{")
+      for _, at := range attrs {
+        g.pad(at.line)
+        if at.is_event {
+          if at.mods == "" { g.w("ui.on(" + quote(at.name) + ", " + at.code + "), ") } else {
+            g.w("ui.on_mod(" + quote(at.name) + ", " + quote(at.mods) + ", " + at.code + "), ")
+          }
+        } else {
+          g.w("ui.a(" + quote(at.name) + ", " + at.code + "), ")
+        }
+      }
+      g.w("}")
+    }
+    g.w(", ")
+    g.list(kids)
+    g.w(",")
+    g.pad(end)
+    g.w(")")
+  }
+  return g.b.string()
+}
+
+# onClick -> event "click"; onSubmit:prevent -> event "submit" with the modifier "prevent"
+fn event_name(it: *Item) {
+  n := it.name
+  if len(n) < 3 || !strings.has_prefix(n, "on") || !is_upper(int(n[2])) { return }
+  mods := ""
+  i := strings.index(n, ":")
+  if i >= 0 {
+    mods = strings.replace_all(n[i + 1:], ":", ",")
+    n = n[0:i]
+  }
+  it.is_event = true
+  it.mods = mods
+  it.name = strings.to_lower(n[2:])
+  if it.name == "doubleclick" { it.name = "dblclick" }
+}
+
+fn (t: *T) component(g: *Gen, name: str, attrs: []Item, kids: []Item, end: int, open: int) {
+  key := ""
+  props := []Item{}
+  for _, at := range attrs {
+    if at.name == "key" { key = at.code } else { props = append(props, at) }
+  }
+  if key != "" { g.w("ui.keyed(" + key + ", ") }
+  if name == "ui.Provider" {
+    ctx := ""
+    value := "nil"
+    for _, at := range props {
+      if at.name == "ctx" { ctx = at.code }
+      if at.name == "value" { value = at.code }
+    }
+    if ctx == "" {
+      t.fail("<ui.Provider> needs ctx={context}", open)
+      return
+    }
+    g.w("ui.provider(" + ctx + ", " + value + ", ")
+    g.list(kids)
+  } else if t.zero[name] {
+    if len(props) > 0 || len(kids) > 0 {
+      t.fail(name + " takes no props: declare fn " + name + "(p: " + name + "Props) to pass attributes or children", open)
+      return
+    }
+    g.w("ui.c0(" + quote(name) + ", " + name)
+  } else {
+    ptype := name + "Props"
+    g.w("ui.c(" + quote(name) + ", fn(p: any) -> *ui.Node { return " + name + "(p.(" + ptype + ")) }, " + ptype + "{")
+    for _, at := range props {
+      g.pad(at.line)
+      field := at.name
+      if at.is_event { field = "on" + strings.to_upper(at.name[0:1]) + at.name[1:] }
+      g.w(field + ": " + at.code + ", ")
+    }
+    if len(kids) > 0 {
+      g.w("children: ")
+      g.list(kids)
+      g.w(", ")
+    }
+    g.w("}")
+  }
+  g.w(",")
+  g.pad(end)
+  g.w(")")
+  if key != "" { g.w(")") }
+}
+
+# the children of <name> up to its closing tag (consumed)
+fn (t: *T) children(name: str, open: int) -> []Item {
+  out := []Item{}
+  while t.err == "" {
+    if t.pos >= len(t.src) {
+      t.fail("<" + name + "> is never closed", open)
+      return out
+    }
+    c := t.at(t.pos)
+    if c == '<' && t.at(t.pos + 1) == '/' {
+      cpos := t.pos
+      t.pos += 2
+      t.skip_ws()
+      cname := t.tag_name()
+      t.skip_ws()
+      if t.at(t.pos) != '>' || cname != name {
+        t.fail("expected </" + name + "> but found </" + cname + ">", cpos)
+        return out
+      }
+      t.pos++
+      return out
+    }
+    if c == '<' {
+      line := t.line_at(t.pos)
+      code := t.node(line)
+      if t.err != "" { return out }
+      out = append(out, Item{line: line, code: code})
+      continue
+    }
+    if c == '{' {
+      # {/* a comment */}
+      j := t.pos + 1
+      while j < len(t.src) && is_ws(t.at(j)) { j++ }
+      if t.at(j) == '/' && t.at(j + 1) == '*' {
+        k := strings.index_from(t.src, "*/", j + 2)
+        if k < 0 {
+          t.fail("this comment is never closed", j)
+          return out
+        }
+        k += 2
+        while k < len(t.src) && is_ws(t.at(k)) { k++ }
+        if t.at(k) != '}' {
+          t.fail("expected } after the comment", k)
+          return out
+        }
+        t.pos = k + 1
+        continue
+      }
+      code, line := t.expr()
+      if t.err != "" { return out }
+      if code != "" { out = append(out, Item{line: line, code: "ui.child(" + code + ")"}) }
+      continue
+    }
+    s := t.pos
+    while t.pos < len(t.src) && t.at(t.pos) != '<' && t.at(t.pos) != '{' { t.pos++ }
+    raw := t.src[s:t.pos]
+    txt := jsx_text(raw)
+    if txt != "" {
+      lead := 0
+      while lead < len(raw) && is_ws(int(raw[lead])) { lead++ }
+      out = append(out, Item{line: t.line_at(s + lead), code: "ui.text(" + quote(unescape(txt)) + ")"})
+    }
+  }
+  return out
+}
+
+# JSX whitespace: lines with only spaces disappear; the others lose the spaces at the line breaks
+# and are joined with one space
+fn jsx_text(raw: str) -> str {
+  lines := strings.split(raw, "\n")
+  parts := []str{}
+  for i, l := range lines {
+    s := strings.replace_all(l, "\t", " ")
+    s = strings.replace_all(s, "\r", "")
+    if i > 0 {
+      while len(s) > 0 && int(s[0]) == 32 { s = s[1:] }
+    }
+    if i < len(lines) - 1 {
+      while len(s) > 0 && int(s[len(s) - 1]) == 32 { s = s[0:len(s) - 1] }
+    }
+    if s != "" { parts = append(parts, s) }
+  }
+  return strings.join(parts, " ")
+}
+
+fn unescape(s: str) -> str {
+  if !strings.contains(s, "&") { return s }
+  s = strings.replace_all(s, "&lt;", "<")
+  s = strings.replace_all(s, "&gt;", ">")
+  s = strings.replace_all(s, "&quot;", "\"")
+  s = strings.replace_all(s, "&#39;", "'")
+  s = strings.replace_all(s, "&apos;", "'")
+  s = strings.replace_all(s, "&nbsp;", " ")
+  s = strings.replace_all(s, "&lbrace;", "{")
+  s = strings.replace_all(s, "&rbrace;", "}")
+  s = strings.replace_all(s, "&amp;", "&")
+  return s
+}
+
+# a Caju string literal
+export fn quote(s: str) -> str {
+  b := &strings.Builder{}
+  b.write("\"")
+  for i := 0; i < len(s); i++ {
+    c := int(s[i])
+    if c == '"' { b.write("\\\"") } else if c == '\\' { b.write("\\\\") } else if c == 10 { b.write("\\n") } else if c == 9 { b.write("\\t") } else if c == 13 { b.write("\\r") } else if c < 32 {
+      b.write("\\x")
+      b.write(strings.from_byte(hexd(c >> 4)))
+      b.write(strings.from_byte(hexd(c & 15)))
+    } else {
+      b.write_byte(c)
+    }
+  }
+  b.write("\"")
+  return b.string()
+}
+
+fn hexd(n: int) -> int {
+  if n < 10 { return '0' + n }
+  return 'a' + n - 10
+}
+
+# writes code and keeps count of the output line, to put each piece on its source line
+struct Gen {
+  b: *strings.Builder
+  line: int
+  t: *T
+}
+fn (g: *Gen) w(s: str) {
+  g.b.write(s)
+  g.line += strings.count(s, "\n")
+}
+fn (g: *Gen) pad(target: int) {
+  if g.line >= target { return }
+  while g.line < target {
+    g.b.write("\n")
+    g.line++
+  }
+  # the indentation the source line has
+  t := g.t
+  if target - 1 < len(t.starts) {
+    i := t.starts[target - 1]
+    k := i
+    while k < len(t.src) && (t.at(k) == 32 || t.at(k) == 9) { k++ }
+    g.b.write(t.src[i:k])
+  }
+}
+fn (g: *Gen) list(kids: []Item) {
+  if len(kids) == 0 {
+    g.w("nil")
+    return
+  }
+  g.w("[]*ui.Node{")
+  for _, k := range kids {
+    g.pad(k.line)
+    g.w(k.code)
+    g.w(", ")
+  }
+  g.w("}")
+}

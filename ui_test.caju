@@ -1,0 +1,261 @@
+import { describe, it, expect } from "std/testing"
+import "ui"
+import "./testdata/fakedom"
+
+fn setup() -> (*ui.Renderer, *fakedom.Dom) {
+  d := fakedom.new_dom()
+  r := ui.new_renderer("#app", fn(b: str) { d.apply(b) })
+  return r, d
+}
+
+fn el(tag: str, kids: []*ui.Node) -> *ui.Node { return ui.h(tag, nil, kids) }
+
+fn li(key: str) -> *ui.Node {
+  return ui.h("li", []ui.Attr{ui.a("key", key)}, []*ui.Node{ui.text(key)})
+}
+
+fn list(keys: []str) -> *ui.Node {
+  items := []*ui.Node{}
+  for _, k := range keys { items = append(items, li(k)) }
+  return ui.h("ul", nil, items)
+}
+
+fn click(r: *ui.Renderer, id: int) {
+  r.dispatch(id, &ui.Event{type: "click"})
+  r.work()
+}
+
+# a counter component (the state lives in the component)
+fn Counter() -> *ui.Node {
+  n := ui.use_int(0)
+  return ui.h("button", []ui.Attr{ui.a("id", "inc"), ui.on("click", fn() { n.set(n.v + 1) })}, []*ui.Node{
+    ui.text("count "),
+    ui.child(n.v),
+  })
+}
+
+struct LabelProps {
+  label: str
+}
+fn Label(p: LabelProps) -> *ui.Node { return ui.h("span", nil, []*ui.Node{ui.text(p.label)}) }
+fn label(s: str) -> *ui.Node {
+  return ui.c("Label", fn(p: any) -> *ui.Node { return Label(p.(LabelProps)) }, LabelProps{label: s})
+}
+
+let log: []str = []str{}
+
+fn Effects() -> *ui.Node {
+  n := ui.use_int(0)
+  ui.use_effect(fn() -> fn() {
+    log = append(log, "mount")
+    return fn() { log = append(log, "cleanup") }
+  }, []any{})
+  ui.use_effect(fn() -> fn() {
+    log = append(log, "n=" + str(n.v))
+    return nil
+  }, []any{n.v})
+  return ui.h("b", []ui.Attr{ui.a("id", "e"), ui.on("click", fn() { n.set(n.v + 1) })}, []*ui.Node{ui.child(n.v)})
+}
+
+let theme = ui.create_context("light")
+fn Themed() -> *ui.Node { return ui.text(ui.use_context(theme).(str)) }
+
+fn Ticker() -> *ui.Node {
+  n := ui.use_int(0)
+  ui.use_interval(100, fn() { n.set(n.v + 1) })
+  return ui.child(n.v)
+}
+
+describe("rendering", fn() {
+  it("creates elements, attributes and text", fn() {
+    r, d := setup()
+    r.render(ui.h("div", []ui.Attr{ui.a("class", "box"), ui.a("hidden", false)}, []*ui.Node{ui.text("hi"), ui.child(42)}))
+    expect(d.html()).to_equal("<div class=\"box\">hi42</div>")
+  })
+  it("patches only what changed", fn() {
+    r, d := setup()
+    r.render(ui.h("p", []ui.Attr{ui.a("class", "a")}, []*ui.Node{ui.text("one")}))
+    r.render(ui.h("p", []ui.Attr{ui.a("class", "a")}, []*ui.Node{ui.text("two")}))
+    expect(d.html()).to_equal("<p class=\"a\">two</p>")
+    expect(d.last["T"]).to_equal(1)
+    expect(d.last["S"]).to_equal(0)
+    expect(d.last["E"]).to_equal(0)
+  })
+  it("removes attributes and replaces elements of another tag", fn() {
+    r, d := setup()
+    r.render(ui.h("p", []ui.Attr{ui.a("title", "t")}, nil))
+    r.render(ui.h("p", nil, nil))
+    expect(d.html()).to_equal("<p></p>")
+    r.render(el("section", nil))
+    expect(d.html()).to_equal("<section></section>")
+  })
+  it("keeps the place of nil and when(false) children", fn() {
+    r, d := setup()
+    r.render(el("div", []*ui.Node{ui.when(false, ui.text("x")), el("i", nil)}))
+    first := d.ids(d.root.children[0].id)
+    r.render(el("div", []*ui.Node{ui.when(true, ui.text("x")), el("i", nil)}))
+    expect(d.html()).to_equal("<div>x<i></i></div>")
+    expect(d.ids(d.root.children[0].id)[1]).to_equal(first[0])
+  })
+  it("renders fragments in place", fn() {
+    r, d := setup()
+    r.render(el("div", []*ui.Node{ui.text("a"), ui.frag([]*ui.Node{ui.text("b"), ui.text("c")}), ui.text("d")}))
+    r.render(el("div", []*ui.Node{ui.text("a"), ui.frag([]*ui.Node{ui.text("b"), ui.text("x"), ui.text("c")}), ui.text("d")}))
+    expect(d.html()).to_equal("<div>abxcd</div>")
+  })
+})
+
+describe("keyed lists", fn() {
+  it("reorder by moving the existing nodes", fn() {
+    r, d := setup()
+    r.render(list([]str{"a", "b", "c", "d"}))
+    ul := d.root.children[0].id
+    before := d.ids(ul)
+    r.render(list([]str{"d", "a", "c", "b"}))
+    expect(d.html()).to_equal("<ul><li>d</li><li>a</li><li>c</li><li>b</li></ul>")
+    after := d.ids(ul)
+    expect(after[0]).to_equal(before[3])
+    expect(after[1]).to_equal(before[0])
+    expect(d.last["E"]).to_equal(0)
+  })
+  it("insert and remove in the middle", fn() {
+    r, d := setup()
+    r.render(list([]str{"a", "b", "c"}))
+    r.render(list([]str{"a", "x", "c", "y"}))
+    expect(d.html()).to_equal("<ul><li>a</li><li>x</li><li>c</li><li>y</li></ul>")
+    r.render(list([]str{"y"}))
+    expect(d.html()).to_equal("<ul><li>y</li></ul>")
+    r.render(list([]str{}))
+    expect(d.html()).to_equal("<ul></ul>")
+  })
+  it("reverse a long list", fn() {
+    r, d := setup()
+    keys := []str{}
+    for i := 0; i < 50; i++ { keys = append(keys, str(i)) }
+    r.render(list(keys))
+    rev := []str{}
+    for i := 49; i >= 0; i-- { rev = append(rev, str(i)) }
+    r.render(list(rev))
+    ul := d.root.children[0]
+    expect(len(ul.children)).to_equal(50)
+    expect(ul.children[0].children[0].text).to_equal("49")
+    expect(ul.children[49].children[0].text).to_equal("0")
+    expect(d.last["E"]).to_equal(0)
+  })
+})
+
+describe("components", fn() {
+  it("keep their state and render again when it changes", fn() {
+    r, d := setup()
+    r.render(el("main", []*ui.Node{ui.c0("Counter", Counter)}))
+    expect(d.html()).to_equal("<main><button id=\"inc\">count 0</button></main>")
+    btn := d.find("id", "inc")
+    click(r, btn)
+    click(r, btn)
+    expect(d.html()).to_equal("<main><button id=\"inc\">count 2</button></main>")
+    expect(d.last["T"]).to_equal(1)
+  })
+  it("receive props", fn() {
+    r, d := setup()
+    r.render(label("one"))
+    r.render(label("two"))
+    expect(d.html()).to_equal("<span>two</span>")
+    expect(d.last["E"]).to_equal(0)
+  })
+  it("run effects after rendering, again when deps change, and clean up on unmount", fn() {
+    log = []str{}
+    r, d := setup()
+    r.render(ui.c0("Effects", Effects))
+    expect(log).to_equal([]str{"mount", "n=0"})
+    click(r, d.find("id", "e"))
+    expect(log).to_equal([]str{"mount", "n=0", "n=1"})
+    r.render(ui.text("gone"))
+    expect(log).to_equal([]str{"mount", "n=0", "n=1", "cleanup"})
+    expect(d.html()).to_equal("gone")
+  })
+  it("read the nearest context provider", fn() {
+    r, d := setup()
+    r.render(el("div", []*ui.Node{ui.c0("Themed", Themed), ui.provider(theme, "dark", []*ui.Node{ui.c0("Themed", Themed)})}))
+    expect(d.html()).to_equal("<div>lightdark</div>")
+  })
+  it("start and clear timers with use_interval", fn() {
+    r, d := setup()
+    r.render(ui.c0("Ticker", Ticker))
+    expect(len(d.timers)).to_equal(1)
+    for id, _ := range d.timers { r.handle("t" + str(id) + ",") }
+    r.work()
+    expect(d.html()).to_equal("1")
+    r.render(ui.empty())
+    expect(len(d.timers)).to_equal(0)
+  })
+})
+
+let renders: int = 0
+struct RowProps {
+  label: str
+}
+fn Row(p: RowProps) -> *ui.Node {
+  renders++
+  return ui.h("i", nil, []*ui.Node{ui.text(p.label)})
+}
+fn row(s: str) -> *ui.Node {
+  return ui.c("Row", fn(p: any) -> *ui.Node { return Row(p.(RowProps)) }, RowProps{label: s})
+}
+
+describe("memo", fn() {
+  it("skips rendering a memo component whose props did not change", fn() {
+    ui.memo("Row")
+    renders = 0
+    r, d := setup()
+    r.render(el("div", []*ui.Node{row("a"), row("b")}))
+    r.render(el("div", []*ui.Node{row("a"), row("c")}))
+    expect(renders).to_equal(3)
+    expect(d.html()).to_equal("<div><i>a</i><i>c</i></div>")
+    r.render(el("div", []*ui.Node{row("z"), row("a"), row("c")}))
+    expect(d.html()).to_equal("<div><i>z</i><i>a</i><i>c</i></div>")
+  })
+})
+
+describe("events", fn() {
+  it("listen once and swap handlers without patches", fn() {
+    r, d := setup()
+    hits := 0
+    r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { hits += 1 })}, nil))
+    expect(d.last["L"]).to_equal(1)
+    ops := d.ops
+    r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { hits += 10 })}, nil))
+    expect(d.ops).to_equal(ops)
+    click(r, d.root.children[0].id)
+    expect(hits).to_equal(10)
+  })
+  it("decode the page's events with value and key", fn() {
+    r, d := setup()
+    got := ""
+    r.render(ui.h("input", []ui.Attr{ui.on("keydown", fn(e: *ui.Event) { got = e.value + "|" + e.key })}, nil))
+    id := d.root.children[0].id
+    r.handle("e7," + str(id) + ",7:keydown3:abc0,5:Enter4:12.51:3")
+    expect(got).to_equal("abc|Enter")
+  })
+  it("report a panicking handler instead of crashing", fn() {
+    r, d := setup()
+    r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { panic("boom") })}, nil))
+    click(r, d.root.children[0].id)
+    expect(len(d.errors)).to_equal(1)
+  })
+})
+
+describe("hot reload", fn() {
+  it("snapshots the components' state and restores it by position", fn() {
+    r, d := setup()
+    r.render(el("main", []*ui.Node{ui.c0("Counter", Counter)}))
+    click(r, d.find("id", "inc"))
+    r.handle("s")
+    r.work()
+    snap := d.snapshot
+    expect(snap).to_equal("{\"0:main/0:Counter\":[1]}")
+    r2, d2 := setup()
+    r2.handle("i" + str(len(snap)) + ":" + snap)
+    r2.render(el("main", []*ui.Node{ui.c0("Counter", Counter)}))
+    expect(d2.html()).to_equal("<main><button id=\"inc\">count 1</button></main>")
+  })
+})

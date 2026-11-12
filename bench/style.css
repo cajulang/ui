@@ -1,0 +1,11 @@
+/* the same minimal styles for both apps (the real benchmark uses Bootstrap) */
+body { font-family: system-ui, sans-serif; margin: 0 1rem; }
+.row { display: flex; flex-wrap: wrap; }
+.col-md-6 { width: 50%; }
+.col-sm-6 { width: 50%; }
+.smallpad { padding: 2px; box-sizing: border-box; }
+.btn { width: 100%; padding: 4px; }
+table { border-collapse: collapse; width: 100%; }
+td { border-top: 1px solid #ddd; padding: 4px 8px; }
+tr.danger { background: #f2dede; }
+.remove { color: #a00; cursor: pointer; }

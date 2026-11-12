@@ -1,0 +1,101 @@
+# ssr: a server for pages rendered on the server (import "github.com/aecdanjundex/ui/ssr").
+#
+#   import "github.com/aecdanjundex/ui"
+#   import "github.com/aecdanjundex/ui/ssr"
+#   import "std/http"
+#   import "./app"
+#
+#   ssr.serve("0.0.0.0", 8080, fn(req: *http.Request) -> str {
+#     return ui.page(ssr.template(), "#app", <app.App path={req.path} />, "")
+#   })
+#
+# serve answers the files of the app's build (caju-ui build: dist/) and, for every other path,
+# the page the function returns ("" for a 404). The client takes the page over with ui.hydrate.
+#
+# Environment: PORT replaces the port, UI_DIST the build's directory (default "dist"), UI_TEMPLATE
+# the page template (default $UI_DIST/index.html). caju-ui dev --ssr sets them.
+import "std/http"
+import "std/os"
+import "std/fs"
+import "std/strings"
+import "std/strconv"
+import filepath "std/path"
+
+fn dist() -> str {
+  d := os.getenv("UI_DIST")
+  if d == "" { return "dist" }
+  return d
+}
+
+# the page template: index.html of the build, with the runtime's scripts
+export fn template() -> str {
+  p := os.getenv("UI_TEMPLATE")
+  if p == "" { p = filepath.join(dist(), "index.html") }
+  s, err := fs.read_file(p)
+  if err != nil { return "<!doctype html><html><body><div id=\"app\"></div><p>ssr: no template (" + p + "): run caju-ui build</p></body></html>" }
+  return s
+}
+
+fn content_type(p: str) -> str {
+  switch filepath.ext(p) {
+  case ".html": return "text/html; charset=utf-8"
+  case ".js", ".mjs": return "text/javascript; charset=utf-8"
+  case ".css": return "text/css; charset=utf-8"
+  case ".json": return "application/json"
+  case ".wasm": return "application/wasm"
+  case ".svg": return "image/svg+xml"
+  case ".png": return "image/png"
+  case ".jpg", ".jpeg": return "image/jpeg"
+  case ".ico": return "image/x-icon"
+  case ".webp": return "image/webp"
+  case ".woff2": return "font/woff2"
+  case ".txt": return "text/plain; charset=utf-8"
+  }
+  return "application/octet-stream"
+}
+
+# the headers every response needs: the page runs the app in a worker with SharedArrayBuffer
+export fn isolate(res: *http.Response) {
+  res.set_header("Cross-Origin-Opener-Policy", "same-origin")
+  res.set_header("Cross-Origin-Embedder-Policy", "require-corp")
+  res.set_header("Cross-Origin-Resource-Policy", "same-origin")
+}
+
+let page_fn: fn(*http.Request) -> str = nil
+
+fn handle(req: *http.Request, res: *http.Response) {
+  isolate(res)
+  clean := filepath.clean("/" + req.path)
+  if clean != "/" && clean != "/index.html" && !strings.contains(clean, "..") {
+    f := filepath.join(dist(), clean[1:])
+    if fs.is_file(f) {
+      data, _ := fs.read_file(f)
+      res.set_header("Content-Type", content_type(f))
+      res.set_header("Cache-Control", "no-cache")
+      res.write(data)
+      return
+    }
+  }
+  html := page_fn(req)
+  if html == "" {
+    res.set_status(404)
+    res.set_header("Content-Type", "text/plain; charset=utf-8")
+    res.write("not found: " + req.path)
+    return
+  }
+  res.set_header("Content-Type", "text/html; charset=utf-8")
+  res.set_header("Cache-Control", "no-store")
+  res.write(html)
+}
+
+# serves the build's files and, for any other path, the page page(req) renders
+export fn serve(host: str, port: int, page: fn(*http.Request) -> str) -> error {
+  if os.getenv("PORT") != "" {
+    n, err := strconv.atoi(os.getenv("PORT"))
+    if err == nil { port = n }
+  }
+  page_fn = page
+  http.handle("/", handle)
+  if os.getenv("UI_DEV") == "" { print("ssr: http://" + host + ":" + str(port)) }
+  return http.listen_and_serve(host, port)
+}

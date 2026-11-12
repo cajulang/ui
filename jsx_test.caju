@@ -1,0 +1,74 @@
+import { describe, it, expect } from "std/testing"
+import "std/strings"
+import "jsx"
+
+fn tr(src: str) -> str {
+  out, err := jsx.transpile(src, "t.cajux", map[str]bool{"App": true})
+  if err != nil { return "ERROR " + err.Error() }
+  return out
+}
+
+fn fails(src: str) -> str {
+  _, err := jsx.transpile(src, "t.cajux", map[str]bool{})
+  if err == nil { return "" }
+  return err.Error()
+}
+
+describe("jsx.transpile", fn() {
+  it("turns an element into ui.h", fn() {
+    expect(tr("x := <div class=\"a\">hi</div>")).to_equal("x := ui.h(\"div\", []ui.Attr{ui.a(\"class\", \"a\"), }, []*ui.Node{ui.text(\"hi\"), },)")
+  })
+  it("leaves comparisons alone", fn() {
+    expect(tr("if a < b && c<d { x = <br/> }")).to_equal("if a < b && c<d { x = ui.h(\"br\", nil, nil,) }")
+  })
+  it("turns expressions into ui.child and events into ui.on", fn() {
+    expect(tr("return <b onClick={fn() { f() }}>{n.v}</b>")).to_equal("return ui.h(\"b\", []ui.Attr{ui.on(\"click\", fn() { f() }), }, []*ui.Node{ui.child(n.v), },)")
+  })
+  it("supports event modifiers", fn() {
+    expect(tr("x := <form onSubmit:prevent={save} />")).to_equal("x := ui.h(\"form\", []ui.Attr{ui.on_mod(\"submit\", \"prevent\", save), }, nil,)")
+  })
+  it("handles JSX whitespace and entities", fn() {
+    expect(tr("x := <p>\n  a &amp; b\n  c {d} e\n</p>")).to_equal("x := ui.h(\"p\", nil, []*ui.Node{\n  ui.text(\"a & b c \"), \n  ui.child(d), ui.text(\" e\"), },\n)")
+  })
+  it("calls components with their props struct", fn() {
+    expect(tr("x := <Card title=\"t\" n={2} onPick={f}><i/></Card>")).to_equal("x := ui.c(\"Card\", fn(p: any) -> *ui.Node { return Card(p.(CardProps)) }, CardProps{title: \"t\", n: 2, onPick: f, children: []*ui.Node{ui.h(\"i\", nil, nil,), }, },)")
+  })
+  it("calls components without props with ui.c0, and keys them", fn() {
+    expect(tr("x := <App key={id} />")).to_equal("x := ui.keyed(id, ui.c0(\"App\", App,))")
+  })
+  it("turns <ui.Provider> into ui.provider", fn() {
+    expect(tr("x := <ui.Provider ctx={theme} value={\"dark\"}><App/></ui.Provider>")).to_equal("x := ui.provider(theme, \"dark\", []*ui.Node{ui.c0(\"App\", App,), },)")
+  })
+  it("supports fragments, nested elements inside expressions and comments", fn() {
+    expect(tr("x := <>{f(<i/>)}{/* hi */}</>")).to_equal("x := ui.frag([]*ui.Node{ui.child(f(ui.h(\"i\", nil, nil,))), },)")
+  })
+  it("keeps every line in place", fn() {
+    src := "fn App() -> *ui.Node {\n  n := ui.use_int(0)\n  return (\n    <div\n      class=\"x\"\n      onClick={fn() {\n        n.set(1)\n      }}>\n      <span>a</span>\n\n      {n.v}\n    </div>\n  )\n}\n"
+    out := tr(src)
+    expect(strings.count(out, "\n")).to_equal(strings.count(src, "\n"))
+    lines := strings.split(out, "\n")
+    expect(strings.contains(lines[6], "n.set(1)")).to_equal(true)
+    expect(strings.contains(lines[8], "ui.text(\"a\")")).to_equal(true)
+    expect(strings.contains(lines[10], "ui.child(n.v)")).to_equal(true)
+    expect(strings.trim_space(lines[12])).to_equal("")
+  })
+  it("starts an element after \"(\" and a line break on the line of the \"(\"", fn() {
+    expect(tr("return (\n  <b>\n    x\n  </b>\n)")).to_equal("return (ui.h(\"b\", nil, []*ui.Node{\n\n    ui.text(\"x\"), },\n  ))\n")
+  })
+  it("reports errors with their line", fn() {
+    expect(fails("x := 1\ny := <div><p></div>")).to_equal("t.cajux, line 2: expected </p> but found </div>")
+    expect(fails("y := <div>\n\n")).to_equal("t.cajux, line 1: <div> is never closed")
+    expect(fails("y := <App a=1 />")).to_equal("t.cajux, line 1: the value of a must be \"text\" or {expression}")
+  })
+})
+
+describe("jsx.components", fn() {
+  it("finds the components that take no props", fn() {
+    zero := map[str]bool{}
+    jsx.components("fn App() -> *ui.Node {}\nexport fn Card(p: CardProps) -> *ui.Node {}\nfn helper() {}\nexport fn Nav() -> *ui.Node {}", "views", zero)
+    expect(zero["App"]).to_equal(true)
+    expect(zero["views.Nav"]).to_equal(true)
+    expect(zero["Card"]).to_equal(false)
+    expect(zero["helper"]).to_equal(false)
+  })
+})

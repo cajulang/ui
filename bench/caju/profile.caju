@@ -1,0 +1,22 @@
+# The benchmark's work without a browser: renders the app natively with a renderer whose patches
+# go nowhere, to find the hot spots (../../../caju/tools/profile.sh profile.caju).
+import ui "../../ui"
+import "std/os"
+import "./app"
+
+bytes := 0
+r := ui.new_renderer("#main", fn(b: str) { bytes += len(b) })
+r.render(ui.c0("App", app.App))
+t0 := os.nanotime()
+for i := 0; i < 20; i++ {
+  app.run()
+  r.work()
+  app.add()
+  r.work()
+  app.update()
+  r.work()
+  app.clear()
+  r.work()
+}
+ms := (os.nanotime() - t0) / 1000000
+print("20 × (create 1k, append 1k, update, clear):", ms, "ms,", bytes / 1024 / 20, "KB of patches per round")

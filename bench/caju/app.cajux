@@ -1,0 +1,181 @@
+# The js-framework-benchmark table, in caju-ui (the React version is in ../react). main.cajux
+# mounts it; profile.caju runs it natively under the profiler.
+import ui "../../ui"
+
+struct Data {
+  id: int
+  label: str
+}
+
+const A = "pretty large big small tall short long handsome plain quaint clean elegant easy angry crazy helpful mushy odd unsightly adorable important inexpensive cheap expensive fancy"
+const C = "red yellow blue green pink brown purple brown white black orange"
+const N = "table chair house bbq desk car pony cookie sandwich burger pizza mouse keyboard"
+
+let adjectives: []str = nil
+let colours: []str = nil
+let nouns: []str = nil
+let seed: int = 1
+let next_id: int = 1
+
+let rows: []Data = []Data{}
+let selected: int = 0
+let tick: *ui.IntState = nil
+
+fn words(s: str) -> []str {
+  out := []str{}
+  start := 0
+  for i := 0; i <= len(s); i++ {
+    if i == len(s) || int(s[i]) == 32 {
+      out = append(out, s[start:i])
+      start = i + 1
+    }
+  }
+  return out
+}
+
+fn rnd(n: int) -> int {
+  seed = (seed * 1103515245 + 12345) % 2147483648
+  return seed % n
+}
+
+fn build(count: int) -> []Data {
+  out := make([]Data, count)
+  for i := 0; i < count; i++ {
+    out[i] = Data{next_id, adjectives[rnd(len(adjectives))] + " " + colours[rnd(len(colours))] + " " + nouns[rnd(len(nouns))]}
+    next_id++
+  }
+  return out
+}
+
+fn refresh() { tick.set(tick.v + 1) }
+
+export fn run() {
+  rows = build(1000)
+  refresh()
+}
+export fn run_lots() {
+  rows = build(10000)
+  refresh()
+}
+export fn add() {
+  more := build(1000)
+  for _, d := range more { rows = append(rows, d) }
+  refresh()
+}
+export fn update() {
+  for i := 0; i < len(rows); i += 10 { rows[i].label = rows[i].label + " !!!" }
+  refresh()
+}
+export fn clear() {
+  rows = []Data{}
+  refresh()
+}
+export fn swap() {
+  if len(rows) > 998 {
+    t := rows[1]
+    rows[1] = rows[998]
+    rows[998] = t
+  }
+  refresh()
+}
+let result: int = 0
+
+# CPU-bound work: how many points of a 600×400 grid are in the Mandelbrot set (1,000 iterations)
+export fn compute() {
+  inside := 0
+  for py := 0; py < 400; py++ {
+    y0 := num(py) / 200.0 - 1.0
+    for px := 0; px < 600; px++ {
+      x0 := num(px) / 200.0 - 2.0
+      let x = 0.0
+      let y = 0.0
+      i := 0
+      while i < 1000 && x * x + y * y <= 4.0 {
+        xt := x * x - y * y + x0
+        y = 2.0 * x * y + y0
+        x = xt
+        i++
+      }
+      if i == 1000 { inside++ }
+    }
+  }
+  result = inside
+  refresh()
+}
+
+export fn pick(id: int) {
+  selected = id
+  refresh()
+}
+export fn remove(id: int) {
+  out := []Data{}
+  for _, d := range rows {
+    if d.id != id { out = append(out, d) }
+  }
+  rows = out
+  refresh()
+}
+
+struct RowProps {
+  id: int
+  label: str
+  selected: bool
+}
+
+fn Row(p: RowProps) -> *ui.Node {
+  cls := ""
+  if p.selected { cls = "danger" }
+  return (
+    <tr class={cls}>
+      <td class="col-md-1">{p.id}</td>
+      <td class="col-md-4"><a onClick={fn() { pick(p.id) }}>{p.label}</a></td>
+      <td class="col-md-1"><a onClick={fn() { remove(p.id) }}><span class="remove">x</span></a></td>
+      <td class="col-md-6"></td>
+    </tr>
+  )
+}
+
+fn Button(p: ButtonProps) -> *ui.Node {
+  return (
+    <div class="col-sm-6 smallpad">
+      <button type="button" class="btn btn-primary btn-block" id={p.id} onClick={p.onClick}>{p.title}</button>
+    </div>
+  )
+}
+
+struct ButtonProps {
+  id: str
+  title: str
+  onClick: fn()
+}
+
+export fn App() -> *ui.Node {
+  tick = ui.use_int(0)
+  items := make([]*ui.Node, len(rows))
+  for i, d := range rows {
+    items[i] = <Row key={d.id} id={d.id} label={d.label} selected={d.id == selected} />
+  }
+  return (
+    <div class="container">
+      <div class="jumbotron"><div class="row">
+        <div class="col-md-6"><h1>caju-ui</h1></div>
+        <div class="col-md-6"><div class="row">
+          <Button id="run" title="Create 1,000 rows" onClick={run} />
+          <Button id="runlots" title="Create 10,000 rows" onClick={run_lots} />
+          <Button id="add" title="Append 1,000 rows" onClick={add} />
+          <Button id="update" title="Update every 10th row" onClick={update} />
+          <Button id="clear" title="Clear" onClick={clear} />
+          <Button id="swaprows" title="Swap Rows" onClick={swap} />
+          <Button id="compute" title="Compute" onClick={compute} />
+        </div></div>
+      </div></div>
+      <p id="result">{result}</p>
+      <table class="table table-hover table-striped test-data"><tbody id="tbody">{items}</tbody></table>
+    </div>
+  )
+}
+
+adjectives = words(A)
+colours = words(C)
+nouns = words(N)
+ui.memo("Row")

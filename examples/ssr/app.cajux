@@ -1,0 +1,47 @@
+# The app's components: rendered by the server (server.cajux) and by the browser (main.cajux).
+import ui "../../ui"
+import "std/strings"
+
+export struct Product {
+  id: int
+  name: str
+  price: int
+}
+
+export struct AppProps {
+  products: []Product
+  query: str
+}
+
+struct CardProps {
+  product: Product
+}
+
+fn Card(p: CardProps) -> *ui.Node {
+  likes := ui.use_int(0)
+  return (
+    <li class="card">
+      <strong>{p.product.name}</strong>
+      <span class="price">R$ {p.product.price}</span>
+      <button class="like" onClick={fn() { likes.set(likes.v + 1) }}>♥ {likes.v}</button>
+    </li>
+  )
+}
+
+export fn App(p: AppProps) -> *ui.Node {
+  query := ui.use_str(p.query)
+  items := []*ui.Node{}
+  for _, pr := range p.products {
+    if query.v != "" && !strings.contains(strings.to_lower(pr.name), strings.to_lower(query.v)) { continue }
+    items = append(items, <Card key={pr.id} product={pr} />)
+  }
+  return (
+    <main class="shop">
+      <h1>Cajuzinho store</h1>
+      <input class="search" placeholder="search" value={query.v}
+        onInput={fn(e: *ui.Event) { query.set(e.value) }} />
+      <p class="count">{len(items)} of {len(p.products)} products</p>
+      <ul>{items}</ul>
+    </main>
+  )
+}

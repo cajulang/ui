@@ -1,0 +1,223 @@
+# A DOM in memory that applies the ui protocol's patches, for the tests: what the page
+# (assets/ui.js) does, without a browser.
+import "std/strings"
+
+export struct El {
+  id: int
+  tag: str            # "#text" for a text node
+  text: str
+  attrs: map[str]str
+  children: []*El
+  parent: *El
+  listens: map[str]str
+}
+
+export struct Dom {
+  nodes: map[int]*El
+  root: *El
+  ops: int            # how many patches were applied in total
+  last: map[str]int   # how many of each op in the last batch
+  timers: map[int]int
+  errors: []str
+  snapshot: str
+  seq: int
+}
+
+export fn new_dom() -> *Dom {
+  return &Dom{nodes: map[int]*El{}, last: map[str]int{}, timers: map[int]int{}}
+}
+
+struct Rd {
+  s: str
+  i: int
+}
+
+fn (r: *Rd) n() -> int {
+  v := 0
+  while int(r.s[r.i]) != ',' {
+    v = v * 10 + int(r.s[r.i]) - '0'
+    r.i++
+  }
+  r.i++
+  return v
+}
+
+fn (r: *Rd) str_() -> str {
+  k := 0
+  while int(r.s[r.i]) != ':' {
+    k = k * 10 + int(r.s[r.i]) - '0'
+    r.i++
+  }
+  r.i++
+  s := r.s[r.i:r.i + k]
+  r.i += k
+  return s
+}
+
+fn detach(c: *El) {
+  p := c.parent
+  if p == nil { return }
+  out := []*El{}
+  for _, x := range p.children {
+    if x != c { out = append(out, x) }
+  }
+  p.children = out
+  c.parent = nil
+}
+
+fn (d: *Dom) forget(e: *El) {
+  delete(d.nodes, e.id)
+  for _, c := range e.children { d.forget(c) }
+}
+
+export fn (d: *Dom) apply(batch: str) {
+  d.last = map[str]int{}
+  r := &Rd{s: batch}
+  while r.i < len(batch) {
+    op := strings.from_byte(int(batch[r.i]))
+    r.i++
+    d.ops++
+    d.last[op] = d.last[op] + 1
+    switch op {
+    case "Q": d.seq = r.n()
+    case "A":
+      id := r.n()
+      r.str_()
+      d.root = &El{id: id, tag: "#root", attrs: map[str]str{}, listens: map[str]str{}}
+      d.nodes[id] = d.root
+    case "E", "N":
+      id := r.n()
+      d.nodes[id] = &El{id: id, tag: r.str_(), attrs: map[str]str{}, listens: map[str]str{}}
+    case "B":
+      id := r.n()
+      r.str_()
+      d.root = &El{id: id, tag: "#root", attrs: map[str]str{}, listens: map[str]str{}}
+      d.nodes[id] = d.root
+    case "h", "j":
+      # hydration claims: there is no server HTML here, so they create the node
+      id := r.n()
+      p := d.nodes[r.n()]
+      c := &El{id: id, attrs: map[str]str{}, listens: map[str]str{}, parent: p}
+      if op == "h" { c.tag = r.str_() } else {
+        c.tag = "#text"
+        c.text = r.str_()
+      }
+      d.nodes[id] = c
+      p.children = append(p.children, c)
+    case "z": r.n()
+    case "e", "n":
+      id := r.n()
+      p := d.nodes[r.n()]
+      c := &El{id: id, tag: r.str_(), attrs: map[str]str{}, listens: map[str]str{}, parent: p}
+      d.nodes[id] = c
+      p.children = append(p.children, c)
+    case "x":
+      id := r.n()
+      p := d.nodes[r.n()]
+      c := &El{id: id, tag: "#text", text: r.str_(), attrs: map[str]str{}, listens: map[str]str{}, parent: p}
+      d.nodes[id] = c
+      p.children = append(p.children, c)
+    case "K":
+      e := d.nodes[r.n()]
+      for _, c := range e.children {
+        c.parent = nil
+        d.forget(c)
+      }
+      e.children = []*El{}
+    case "X":
+      id := r.n()
+      d.nodes[id] = &El{id: id, tag: "#text", text: r.str_(), attrs: map[str]str{}, listens: map[str]str{}}
+    case "S":
+      e := d.nodes[r.n()]
+      name := r.str_()
+      e.attrs[name] = r.str_()
+    case "R":
+      e := d.nodes[r.n()]
+      delete(e.attrs, r.str_())
+    case "T":
+      e := d.nodes[r.n()]
+      e.text = r.str_()
+    case "I":
+      p := d.nodes[r.n()]
+      c := d.nodes[r.n()]
+      before := r.n()
+      detach(c)
+      c.parent = p
+      if before == 0 {
+        p.children = append(p.children, c)
+      } else {
+        out := []*El{}
+        for _, x := range p.children {
+          if x.id == before { out = append(out, c) }
+          out = append(out, x)
+        }
+        p.children = out
+      }
+    case "D":
+      e := d.nodes[r.n()]
+      detach(e)
+      d.forget(e)
+    case "L":
+      e := d.nodes[r.n()]
+      t := r.str_()
+      e.listens[t] = r.str_()
+    case "U":
+      e := d.nodes[r.n()]
+      delete(e.listens, r.str_())
+    case "M":
+      id := r.n()
+      d.timers[id] = r.n()
+      r.n()
+    case "C": delete(d.timers, r.n())
+    case "P":
+      r.n()
+      r.n()
+      r.n()
+      r.str_()
+    case "F": r.n()
+    case "Z": d.snapshot = r.str_()
+    case "!": d.errors = append(d.errors, r.str_())
+    default: panic("fakedom: unknown op " + op)
+    }
+  }
+}
+
+fn html_of(e: *El, b: *strings.Builder) {
+  if e.tag == "#text" {
+    b.write(e.text)
+    return
+  }
+  b.write("<" + e.tag)
+  for k, v := range e.attrs { b.write(" " + k + "=\"" + v + "\"") }
+  b.write(">")
+  for _, c := range e.children { html_of(c, b) }
+  b.write("</" + e.tag + ">")
+}
+
+# the HTML inside the root (attributes in the order they were first set)
+export fn (d: *Dom) html() -> str {
+  b := &strings.Builder{}
+  for _, c := range d.root.children { html_of(c, b) }
+  return b.string()
+}
+
+# the first element with the attribute name=value (0 if none)
+export fn (d: *Dom) find(name: str, value: str) -> int {
+  return find_in(d.root, name, value)
+}
+
+fn find_in(e: *El, name: str, value: str) -> int {
+  if v, ok := e.attrs[name]; ok && v == value { return e.id }
+  for _, c := range e.children {
+    id := find_in(c, name, value)
+    if id != 0 { return id }
+  }
+  return 0
+}
+
+# the node ids of the root's element children, in order (to check that nodes were reused)
+export fn (d: *Dom) ids(parent: int) -> []int {
+  out := []int{}
+  for _, c := range d.nodes[parent].children { out = append(out, c.id) }
+  return out
+}

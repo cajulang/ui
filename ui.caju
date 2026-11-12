@@ -1,0 +1,1635 @@
+# ui: a React-style UI library for Caju, rendered from WebAssembly.
+#
+# Components are functions that return a *ui.Node. Write them with the JSX-like syntax of .cajux
+# files (the caju-ui command turns them into plain Caju) or call ui.h / ui.text / ui.c directly:
+#
+#   fn Counter() -> *ui.Node {
+#     count := ui.use_int(0)
+#     return <button onClick={fn() { count.set(count.v + 1) }}>clicked {count.v} times</button>
+#   }
+#   ui.mount("#app", <Counter />)
+#
+# The whole program runs in a Web Worker: rendering, diffing and the components' state live in
+# WebAssembly, off the page's main thread. The page (assets/ui.js) only applies the DOM patches
+# this file sends and forwards events back. Both directions are plain system calls on the virtual
+# device /dev/ui (write: patches; read: events, blocking until there are some), so no special
+# support from the compiler is needed.
+#
+# The protocol (text; a number is decimal digits and ","; a string is its byte length, ":" and
+# the bytes):
+#   page <- program   Q seq        the last event this batch answers (first op of every batch)
+#                     A id sel     adopt the element matching sel as node id (cleared)
+#                     B id sel     adopt it keeping its children: they came from the server, and
+#                     h id p tag   the next element child of p is node id (created if missing)
+#                     j id p text  the next text child of p is node id, with this text
+#                     z p          remove the children of p not claimed by h or j
+#                     E id tag     create an element (N: in the SVG namespace)
+#                     e id p tag   create an element and append it to node p (n: SVG)
+#                     X id text    create a text node (x id p text: and append it to node p)
+#                     K id         remove all the children of node id
+#                     S id name v  set an attribute (R id name: remove it)
+#                     T id text    set a text node's text
+#                     I p c before insert node c into p before node before (0: append)
+#                     D id         remove a node (and forget its subtree)
+#                     L id type mods  listen to an event (mods: "prevent", "stop", "prevent,stop")
+#                     U id type    stop listening
+#                     M id ms rep  start a timer (rep 1: interval); C id: clear it
+#                     P id w h px  put RGBA pixels into a <canvas>
+#                     F id         focus a node
+#                     Z json       the state snapshot asked for by a hot reload
+#                     ! text       an error to show (a panic in a component or handler)
+#   page -> program   i state data init: the components' state to restore (after a hot reload or
+#                                  from the server, "" for none) and the page's data (ui.data)
+#                     e seq id type value checked key x y   a DOM event
+#                     t id         a timer fired
+#                     s            take a state snapshot (a hot reload is coming)
+
+import "std/os"
+import "std/strings"
+import "std/json"
+
+const DEVICE = "/dev/ui"
+
+const K_ELEM = 1
+const K_TEXT = 2
+const K_FRAG = 3
+const K_COMP = 4
+
+const A_ATTR = 1
+const A_EVENT = 2
+const A_KEY = 3
+const A_REF = 4
+
+# ---------------------------------------------------------------------------------------------
+# Nodes
+
+# an attribute, event listener, key or ref of an element (see a, on, on_mod)
+export struct Attr {
+  kind: int
+  name: str
+  val: str
+  on: bool            # the attribute is present (false: removed, e.g. disabled={false})
+  handler: any        # fn() or fn(*Event)
+  mods: str
+  ref: *ElementRef
+}
+
+# a DOM event, as the page saw it
+export struct Event {
+  type: str
+  value: str          # target.value
+  checked: bool       # target.checked
+  key: str            # KeyboardEvent.key
+  x: num              # clientX
+  y: num              # clientY
+  target: int
+}
+
+# a reference to a rendered element: ref={r} in an element sets it (see use_element)
+export struct ElementRef {
+  id: int
+}
+
+# a virtual DOM node: an element, a text, a fragment or a component
+export struct Node {
+  kind: int
+  tag: str
+  key: str
+  has_key: bool
+  attrs: []Attr
+  children: []*Node
+  text: str
+  cname: str                  # the component's name: two components are the same type if equal
+  render: fn(any) -> *Node
+  render0: fn() -> *Node
+  props: any
+  ctx: *Context
+  ctxval: any
+  # set while mounted
+  dom: int
+  mounted: bool
+  svg: bool
+  parent: *Node
+  pdom: int
+  inst: *Instance
+}
+
+# an element: h("div", []ui.Attr{ui.a("class", "box")}, []*ui.Node{ui.text("hi")})
+export fn h(tag: str, attrs: []Attr, children: []*Node) -> *Node {
+  n := &Node{kind: K_ELEM, tag: tag, attrs: attrs, children: fill(children)}
+  for i := 0; i < len(attrs); i++ {
+    if attrs[i].kind == A_KEY {
+      n.key = attrs[i].val
+      n.has_key = true
+    }
+  }
+  return n
+}
+
+# a text node
+export fn text(s: str) -> *Node { return &Node{kind: K_TEXT, text: s} }
+
+# a fragment: several nodes with no element around them
+export fn frag(children: []*Node) -> *Node { return &Node{kind: K_FRAG, children: fill(children)} }
+
+# nothing (keeps its place among the siblings, like null in React)
+export fn empty() -> *Node { return &Node{kind: K_FRAG} }
+
+# a component with props: c("Card", fn(p: any) -> *ui.Node { return Card(p.(CardProps)) }, props)
+export fn c(name: str, render: fn(any) -> *Node, props: any) -> *Node {
+  return &Node{kind: K_COMP, cname: name, render: render, props: props}
+}
+
+# a component without props: c0("App", App)
+export fn c0(name: str, render: fn() -> *Node) -> *Node {
+  return &Node{kind: K_COMP, cname: name, render0: render}
+}
+
+# gives a node a key: among its siblings, the node with the same key is the same node
+export fn keyed(k: any, n: *Node) -> *Node {
+  if n == nil { n = empty() }
+  n.key = to_s(k)
+  n.has_key = true
+  return n
+}
+
+# a node from any value: *Node, []*Node, str, int, num, bool (true and false render nothing), nil
+export fn child(v: any) -> *Node {
+  switch x := v.(type) {
+  case nil: return empty()
+  case *Node:
+    if x == nil { return empty() }
+    return x
+  case []*Node: return frag(x)
+  case str: return text(x)
+  case int: return text(str(x))
+  case num: return text(str(x))
+  case bool: return empty()
+  case error: return text(x.Error())
+  }
+  return text(to_s(v))
+}
+
+# n when cond is true, nothing otherwise
+export fn when(cond: bool, n: *Node) -> *Node {
+  if cond { return n }
+  return empty()
+}
+
+# one of two nodes
+export fn either(cond: bool, yes: *Node, no: *Node) -> *Node {
+  if cond { return yes }
+  return no
+}
+
+# a fragment with f(0), f(1) ... f(n-1)
+export fn each(n: int, f: fn(int) -> *Node) -> *Node {
+  out := make([]*Node, n)
+  for i := 0; i < n; i++ { out[i] = f(i) }
+  return frag(out)
+}
+
+# the class names whose condition is true, in order: cx(map[str]bool{"item": true, "done": d})
+export fn cx(classes: map[str]bool) -> str {
+  b := strings.Builder{}
+  for k, on := range classes {
+    if !on { continue }
+    if b.len() > 0 { b.write(" ") }
+    b.write(k)
+  }
+  return b.string()
+}
+
+fn fill(ch: []*Node) -> []*Node {
+  for i := 0; i < len(ch); i++ {
+    if ch[i] == nil { ch[i] = empty() }
+  }
+  return ch
+}
+
+fn to_s(v: any) -> str {
+  switch x := v.(type) {
+  case nil: return ""
+  case str: return x
+  case int: return str(x)
+  case num: return str(x)
+  case bool:
+    if x { return "true" }
+    return "false"
+  }
+  s, err := json.marshal(v)
+  if err != nil { return "?" }
+  return s
+}
+
+# an attribute. nil and false remove it, true sets it empty (disabled={true}); "key" and "ref"
+# are not attributes of the DOM element (see keyed and use_element)
+export fn a(name: str, v: any) -> Attr {
+  if name == "key" { return Attr{kind: A_KEY, name: name, val: to_s(v), on: true} }
+  if name == "ref" {
+    if r, ok := v.(*ElementRef); ok { return Attr{kind: A_REF, name: name, ref: r} }
+    return Attr{kind: A_REF, name: name}
+  }
+  if name == "className" { name = "class" }
+  if name == "htmlFor" { name = "for" }
+  switch x := v.(type) {
+  case nil: return Attr{kind: A_ATTR, name: name}
+  case bool: return Attr{kind: A_ATTR, name: name, on: x}
+  case str: return Attr{kind: A_ATTR, name: name, val: x, on: true}
+  }
+  return Attr{kind: A_ATTR, name: name, val: to_s(v), on: true}
+}
+
+# an event listener: h is fn() or fn(e: *ui.Event). The event name is the DOM's ("click",
+# "input", "keydown"...)
+export fn on(event: str, h: any) -> Attr { return Attr{kind: A_EVENT, name: event, handler: h} }
+
+# an event listener with modifiers: "prevent" (preventDefault), "stop" (stopPropagation), or both
+# separated by a comma. "submit" is always prevented (a form never reloads the page)
+export fn on_mod(event: str, mods: str, h: any) -> Attr {
+  return Attr{kind: A_EVENT, name: event, handler: h, mods: mods}
+}
+
+# ---------------------------------------------------------------------------------------------
+# The renderer
+
+export struct Instance {
+  vnode: *Node
+  rendered: *Node
+  hooks: []any
+  hi: int
+  dirty: bool
+  dead: bool
+  depth: int
+}
+
+struct Pending {
+  inst: *Instance
+  h: *EffectHook
+  f: fn() -> fn()
+  depth: int
+}
+
+export struct Renderer {
+  out: *strings.Builder
+  next_id: int
+  root: *Node
+  listeners: map[int]*Node      # the elements with event listeners, by node id
+  dirty: []*Instance
+  effects: []*Pending
+  timers: map[int]fn()
+  repeat: map[int]bool
+  next_timer: int
+  restore: map[str][]any
+  seq: int
+  sink: fn(str)                 # where the batches of patches go
+  errors: []str
+  dg: [20]int
+  selector: str
+  adopted: bool
+  hydrating: bool               # claiming the DOM the server rendered instead of creating it
+  server: bool                  # rendering to a string: no effects, no timers
+}
+
+let R: *Renderer = nil
+let current: *Instance = nil
+
+# a renderer for the element matching selector; sink receives each batch of patches. mount uses
+# it with the page; tests use it with a fake DOM (testing.caju)
+export fn new_renderer(selector: str, sink: fn(str)) -> *Renderer {
+  r := &Renderer{out: &strings.Builder{}, next_id: 1, listeners: map[int]*Node{}, timers: map[int]fn(){}, repeat: map[int]bool{}, sink: sink, selector: selector}
+  r.root = &Node{kind: K_ELEM, tag: "#root", dom: r.new_id(), mounted: true}
+  R = r
+  return r
+}
+
+fn (r: *Renderer) new_id() -> int {
+  id := r.next_id
+  r.next_id++
+  return id
+}
+
+# every batch starts with "Q<seq>,": the last event it answers
+fn (r: *Renderer) op(c: str) {
+  if r.out.len() == 0 {
+    r.out.write_byte('Q')
+    r.wi(r.seq)
+  }
+  r.out.write(c)
+}
+# a number, written digit by digit (no string allocated: this runs for every patch)
+fn (r: *Renderer) wn(n: int) {
+  if n < 0 {
+    r.out.write_byte('-')
+    n = -n
+  }
+  if n < 10 {
+    r.out.write_byte('0' + n)
+    return
+  }
+  k := 0
+  while n > 0 {
+    r.dg[k] = n % 10
+    n = n / 10
+    k++
+  }
+  while k > 0 {
+    k--
+    r.out.write_byte('0' + r.dg[k])
+  }
+}
+fn (r: *Renderer) wi(n: int) {
+  r.wn(n)
+  r.out.write_byte(',')
+}
+fn (r: *Renderer) ws(s: str) {
+  r.wn(len(s))
+  r.out.write_byte(':')
+  r.out.write(s)
+}
+fn (r: *Renderer) insert(parent: int, child: int, before: int) {
+  r.op("I")
+  r.wi(parent)
+  r.wi(child)
+  r.wi(before)
+}
+
+# renders n into the root (again: the previous tree is patched into the new one)
+export fn (r: *Renderer) render(n: *Node) {
+  R = r
+  if n == nil { n = empty() }
+  if !r.adopted {
+    r.adopted = true
+    if r.hydrating { r.op("B") } else { r.op("A") }
+    r.wi(r.root.dom)
+    r.ws(r.selector)
+  }
+  old := r.root.children
+  nw := []*Node{n}
+  r.root.children = nw
+  r.reconcile_children(r.root, r.root.dom, old, nw, 0)
+  if r.hydrating {
+    r.op("z")
+    r.wi(r.root.dom)
+    r.hydrating = false
+  }
+  r.work()
+}
+
+# renders n over the HTML the server rendered with render_to_string: the existing elements are
+# kept (only the event listeners are added), and whatever does not match is fixed
+export fn (r: *Renderer) hydrate(n: *Node) {
+  r.hydrating = !r.adopted
+  r.render(n)
+}
+
+# removes everything (running the effects' cleanups)
+export fn (r: *Renderer) unmount() {
+  R = r
+  for _, c := range r.root.children { r.unmount_node(c, true) }
+  r.root.children = nil
+  r.send()
+}
+
+# renders the components whose state changed, runs the effects, and sends the patches
+export fn (r: *Renderer) work() {
+  R = r
+  for round := 0; round < 100; round++ {
+    r.render_dirty()
+    effs := r.effects
+    r.effects = nil
+    # children's effects first, as in React
+    for i := 1; i < len(effs); i++ {
+      p := effs[i]
+      j := i - 1
+      while j >= 0 && effs[j].depth < p.depth {
+        effs[j + 1] = effs[j]
+        j--
+      }
+      effs[j + 1] = p
+    }
+    for _, p := range effs { r.run_effect(p) }
+    if len(r.dirty) == 0 && len(r.effects) == 0 { break }
+  }
+  r.send()
+}
+
+fn (r: *Renderer) send() {
+  if r.out.len() == 0 { return }
+  batch := r.out.string()
+  r.out.reset()
+  if r.sink != nil { r.sink(batch) }
+}
+
+fn (r: *Renderer) run_effect(p: *Pending) {
+  if p.inst.dead { return }
+  defer fn() {
+    e := recover()
+    if e != nil { r.fail("effect", e) }
+  }()
+  if p.h.cleanup != nil {
+    c := p.h.cleanup
+    p.h.cleanup = nil
+    c()
+  }
+  p.h.cleanup = p.f()
+}
+
+fn (r: *Renderer) fail(where: str, e: any) {
+  msg := "ui: panic in " + where + ": " + to_s(e)
+  r.errors = append(r.errors, msg)
+  os.eprintln(msg)
+  r.op("!")
+  r.ws(msg)
+}
+
+fn (r: *Renderer) render_dirty() {
+  while len(r.dirty) > 0 {
+    list := r.dirty
+    r.dirty = nil
+    # parents first: rendering a parent renders its children too
+    for i := 1; i < len(list); i++ {
+      p := list[i]
+      j := i - 1
+      while j >= 0 && list[j].depth > p.depth {
+        list[j + 1] = list[j]
+        j--
+      }
+      list[j + 1] = p
+    }
+    for _, inst := range list {
+      if inst.dirty && !inst.dead { r.rerender(inst) }
+    }
+  }
+}
+
+fn (r: *Renderer) rerender(inst: *Instance) {
+  v := inst.vnode
+  out := r.render_comp(inst)
+  before := next_dom_after(v)
+  inst.rendered = r.reconcile_one(v, inst.rendered, out, v.pdom, before)
+}
+
+fn (r: *Renderer) render_comp(inst: *Instance) -> *Node {
+  prev := current
+  current = inst
+  inst.hi = 0
+  inst.dirty = false
+  v := inst.vnode
+  let out: *Node = nil
+  if v.ctx != nil {
+    out = frag(v.children)
+  } else if v.render0 != nil {
+    f := v.render0
+    out = f()
+  } else {
+    g := v.render
+    out = g(v.props)
+  }
+  current = prev
+  if out == nil { out = empty() }
+  return out
+}
+
+fn same_type(a: *Node, b: *Node) -> bool {
+  if a.kind != b.kind || a.has_key != b.has_key || a.key != b.key { return false }
+  if a.kind == K_ELEM { return a.tag == b.tag }
+  if a.kind == K_COMP { return a.cname == b.cname }
+  return true
+}
+
+# a copy of a node that is already mounted somewhere else (the same *Node rendered twice)
+fn clone(v: *Node) -> *Node {
+  n := &Node{kind: v.kind, tag: v.tag, key: v.key, has_key: v.has_key, attrs: v.attrs, text: v.text, cname: v.cname, render: v.render, render0: v.render0, props: v.props, ctx: v.ctx, ctxval: v.ctxval}
+  if len(v.children) > 0 {
+    n.children = make([]*Node, len(v.children))
+    for i, ch := range v.children { n.children[i] = clone(ch) }
+  }
+  return n
+}
+
+fn (r: *Renderer) prepare(parent: *Node, i: int) -> *Node {
+  ch := parent.children[i]
+  if ch.mounted {
+    ch = clone(ch)
+    parent.children[i] = ch
+  }
+  ch.parent = parent
+  return ch
+}
+
+fn parent_svg(v: *Node) -> bool {
+  p := v.parent
+  while p != nil {
+    if p.kind == K_ELEM { return p.svg && p.tag != "foreignObject" }
+    p = p.parent
+  }
+  return false
+}
+
+fn (r: *Renderer) mount(v: *Node, pdom: int, before: int) {
+  v.mounted = true
+  if v.kind == K_TEXT {
+    v.dom = r.new_id()
+    if r.hydrating {
+      r.op("j")
+      r.wi(v.dom)
+      r.wi(pdom)
+      r.ws(v.text)
+    } else if before == 0 {
+      r.op("x")
+      r.wi(v.dom)
+      r.wi(pdom)
+      r.ws(v.text)
+    } else {
+      r.op("X")
+      r.wi(v.dom)
+      r.ws(v.text)
+      r.insert(pdom, v.dom, before)
+    }
+  } else if v.kind == K_ELEM {
+    v.dom = r.new_id()
+    v.svg = v.tag == "svg" || parent_svg(v)
+    # appended right away when it goes at the end (one op instead of two)
+    if r.hydrating {
+      r.op("h")
+      r.wi(v.dom)
+      r.wi(pdom)
+    } else if before == 0 {
+      if v.svg { r.op("n") } else { r.op("e") }
+      r.wi(v.dom)
+      r.wi(pdom)
+    } else {
+      if v.svg { r.op("N") } else { r.op("E") }
+      r.wi(v.dom)
+    }
+    r.ws(v.tag)
+    for i := 0; i < len(v.attrs); i++ { r.set_attr(v, nil, &v.attrs[i]) }
+    for i := 0; i < len(v.children); i++ { r.mount(r.prepare(v, i), v.dom, 0) }
+    if r.hydrating {
+      r.op("z")
+      r.wi(v.dom)
+    } else if before != 0 {
+      r.insert(pdom, v.dom, before)
+    }
+  } else if v.kind == K_FRAG {
+    for i := 0; i < len(v.children); i++ { r.mount(r.prepare(v, i), pdom, before) }
+  } else {
+    v.pdom = pdom
+    inst := &Instance{vnode: v}
+    v.inst = inst
+    inst.depth = depth_of(v)
+    out := r.render_comp(inst)
+    if out.mounted { out = clone(out) }
+    out.parent = v
+    inst.rendered = out
+    r.mount(out, pdom, before)
+  }
+}
+
+fn (r: *Renderer) patch(old: *Node, n: *Node, pdom: int, before: int) {
+  n.mounted = true
+  if n.kind == K_TEXT {
+    n.dom = old.dom
+    if n.text != old.text {
+      r.op("T")
+      r.wi(n.dom)
+      r.ws(n.text)
+    }
+  } else if n.kind == K_ELEM {
+    n.dom = old.dom
+    n.svg = old.svg
+    r.diff_attrs(n, old.attrs, n.attrs)
+    r.reconcile_children(n, n.dom, old.children, n.children, 0)
+  } else if n.kind == K_FRAG {
+    r.reconcile_children(n, pdom, old.children, n.children, before)
+  } else {
+    inst := old.inst
+    n.inst = inst
+    n.pdom = pdom
+    inst.vnode = n
+    # a memo component with the same props and no state change keeps what it rendered
+    if !inst.dirty && memos[n.cname] && n.render != nil && same_props(old.props, n.props) {
+      inst.rendered.parent = n
+      return
+    }
+    out := r.render_comp(inst)
+    inst.rendered = r.reconcile_one(n, inst.rendered, out, pdom, before)
+  }
+}
+
+let memos = map[str]bool{}
+
+# marks the component name as pure, like React.memo: when its parent renders again, it only
+# renders again if its props changed (compared with ==) or its own state did. Props with
+# functions never compare equal; pass them through a context instead
+export fn memo(name: str) { memos[name] = true }
+
+fn same_props(a: any, b: any) -> bool {
+  eq := false
+  defer fn() { recover() }()
+  eq = a == b
+  return eq
+}
+
+# old -> n in the same place; returns the node that ended up mounted (n or a copy of it)
+fn (r: *Renderer) reconcile_one(parent: *Node, old: *Node, n: *Node, pdom: int, before: int) -> *Node {
+  if n == old {
+    n.parent = parent
+    return n
+  }
+  if n.mounted { n = clone(n) }
+  n.parent = parent
+  if same_type(old, n) {
+    r.patch(old, n, pdom, before)
+    return n
+  }
+  ref := first_dom(old)
+  if ref == 0 { ref = before }
+  r.mount(n, pdom, ref)
+  r.unmount_node(old, true)
+  return n
+}
+
+# the keyed diff of a list of children: nodes are matched by key (or position, without one),
+# patched in place, and only the ones out of order are moved
+fn (r: *Renderer) reconcile_children(parent: *Node, pdom: int, old: []*Node, nw: []*Node, before: int) {
+  # all new: mount them in order
+  if len(old) == 0 {
+    for i := 0; i < len(nw); i++ {
+      n := nw[i]
+      if n.mounted {
+        n = clone(n)
+        nw[i] = n
+      }
+      n.parent = parent
+      r.mount(n, pdom, before)
+    }
+    return
+  }
+  # all gone: when they are all of an element's children, one op clears it
+  if len(nw) == 0 {
+    if parent.kind == K_ELEM && pdom == parent.dom {
+      for _, o := range old { r.unmount_node(o, false) }
+      r.op("K")
+      r.wi(pdom)
+      return
+    }
+    for _, o := range old { r.unmount_node(o, true) }
+    return
+  }
+  # keyed children match by key, the others by position
+  let keyed: map[str]int
+  for i, o := range old {
+    if o.has_key {
+      if keyed == nil { keyed = map[str]int{} }
+      keyed[o.key] = i
+    }
+  }
+  used := make([]bool, len(old))
+  match := make([]int, len(nw))
+  for i, n := range nw {
+    match[i] = -1
+    j := -1
+    if n.has_key {
+      if keyed != nil {
+        k, ok := keyed[n.key]
+        if ok { j = k }
+      }
+    } else if i < len(old) && !old[i].has_key {
+      j = i
+    }
+    if j >= 0 && !used[j] && (n == old[j] || same_type(old[j], n)) {
+      match[i] = j
+      used[j] = true
+    }
+  }
+  # nothing in common (the whole list replaced): clear the element once and mount the new ones
+  if parent.kind == K_ELEM && pdom == parent.dom {
+    any_used := false
+    for j := 0; j < len(used); j++ {
+      if used[j] { any_used = true }
+    }
+    if !any_used {
+      for _, o := range old { r.unmount_node(o, false) }
+      r.op("K")
+      r.wi(pdom)
+      for i := 0; i < len(nw); i++ {
+        n := nw[i]
+        if n.mounted {
+          n = clone(n)
+          nw[i] = n
+        }
+        n.parent = parent
+        r.mount(n, pdom, 0)
+      }
+      return
+    }
+  }
+  for j, o := range old {
+    if !used[j] { r.unmount_node(o, true) }
+  }
+  ref := before
+  last := len(old)
+  for i := len(nw) - 1; i >= 0; i-- {
+    n := nw[i]
+    j := match[i]
+    if j >= 0 {
+      o := old[j]
+      if n != o {
+        if n.mounted {
+          n = clone(n)
+          nw[i] = n
+        }
+        n.parent = parent
+        r.patch(o, n, pdom, ref)
+      } else {
+        n.parent = parent
+      }
+      if j < last { last = j } else { r.move_nodes(n, pdom, ref) }
+    } else {
+      if n.mounted {
+        n = clone(n)
+        nw[i] = n
+      }
+      n.parent = parent
+      r.mount(n, pdom, ref)
+    }
+    d := first_dom(n)
+    if d != 0 { ref = d }
+  }
+}
+
+fn first_dom(v: *Node) -> int {
+  if v.kind == K_TEXT || v.kind == K_ELEM { return v.dom }
+  if v.kind == K_FRAG {
+    for _, ch := range v.children {
+      d := first_dom(ch)
+      if d != 0 { return d }
+    }
+    return 0
+  }
+  if v.inst != nil && v.inst.rendered != nil { return first_dom(v.inst.rendered) }
+  return 0
+}
+
+fn dom_nodes(v: *Node, out: []int) -> []int {
+  if v.kind == K_TEXT || v.kind == K_ELEM { return append(out, v.dom) }
+  if v.kind == K_FRAG {
+    for _, ch := range v.children { out = dom_nodes(ch, out) }
+    return out
+  }
+  if v.inst != nil && v.inst.rendered != nil { return dom_nodes(v.inst.rendered, out) }
+  return out
+}
+
+fn (r: *Renderer) move_nodes(v: *Node, pdom: int, ref: int) {
+  for _, d := range dom_nodes(v, []int{}) { r.insert(pdom, d, ref) }
+}
+
+fn index_of(list: []*Node, v: *Node) -> int {
+  for i, x := range list {
+    if x == v { return i }
+  }
+  return -1
+}
+
+# the DOM node right after v's nodes in their parent element (0: v's nodes are the last ones)
+fn next_dom_after(v: *Node) -> int {
+  while v.parent != nil {
+    p := v.parent
+    if p.kind != K_COMP {
+      i := index_of(p.children, v)
+      for k := i + 1; k < len(p.children); k++ {
+        d := first_dom(p.children[k])
+        if d != 0 { return d }
+      }
+    }
+    if p.kind == K_ELEM { return 0 }
+    v = p
+  }
+  return 0
+}
+
+fn (r: *Renderer) unmount_node(v: *Node, remove: bool) {
+  if v.kind == K_TEXT {
+    if remove {
+      r.op("D")
+      r.wi(v.dom)
+    }
+  } else if v.kind == K_ELEM {
+    for _, ch := range v.children { r.unmount_node(ch, false) }
+    for i := 0; i < len(v.attrs); i++ {
+      at := &v.attrs[i]
+      if at.kind == A_EVENT { delete(r.listeners, v.dom) }
+      if at.kind == A_REF && at.ref != nil && at.ref.id == v.dom { at.ref.id = 0 }
+    }
+    if remove {
+      r.op("D")
+      r.wi(v.dom)
+    }
+  } else if v.kind == K_FRAG {
+    for _, ch := range v.children { r.unmount_node(ch, remove) }
+  } else if v.inst != nil {
+    inst := v.inst
+    inst.dead = true
+    for _, hk := range inst.hooks {
+      if e, ok := hk.(*EffectHook); ok {
+        if e.cleanup != nil {
+          c := e.cleanup
+          e.cleanup = nil
+          c()
+        }
+      }
+    }
+    if inst.rendered != nil { r.unmount_node(inst.rendered, remove) }
+  }
+  v.mounted = false
+}
+
+fn find_attr(list: []Attr, kind: int, name: str) -> int {
+  for i, at := range list {
+    if at.kind == kind && at.name == name { return i }
+  }
+  return -1
+}
+
+fn (r: *Renderer) diff_attrs(v: *Node, old: []Attr, nw: []Attr) {
+  for i := 0; i < len(nw); i++ {
+    # usually the same attributes in the same order
+    j := i
+    if j >= len(old) || old[j].kind != nw[i].kind || old[j].name != nw[i].name { j = find_attr(old, nw[i].kind, nw[i].name) }
+    if j >= 0 { r.set_attr(v, &old[j], &nw[i]) } else { r.set_attr(v, nil, &nw[i]) }
+  }
+  if len(old) == len(nw) {
+    same := true
+    for i := 0; i < len(old); i++ {
+      if old[i].kind != nw[i].kind || old[i].name != nw[i].name { same = false }
+    }
+    if same { return }
+  }
+  for i := 0; i < len(old); i++ {
+    if find_attr(nw, old[i].kind, old[i].name) < 0 { r.set_attr(v, &old[i], nil) }
+  }
+}
+
+# o -> n for one attribute of v (nil: absent)
+fn (r: *Renderer) set_attr(v: *Node, o: *Attr, n: *Attr) {
+  ho := o != nil
+  hn := n != nil
+  kind := 0
+  name := ""
+  if hn {
+    kind = n.kind
+    name = n.name
+  } else {
+    kind = o.kind
+    name = o.name
+  }
+  if kind == A_KEY { return }
+  if kind == A_REF {
+    if ho && o.ref != nil && (!hn || o.ref != n.ref) && o.ref.id == v.dom { o.ref.id = 0 }
+    if hn && n.ref != nil { n.ref.id = v.dom }
+    return
+  }
+  if kind == A_EVENT {
+    if !hn || n.handler == nil {
+      if ho && o.handler != nil {
+        r.op("U")
+        r.wi(v.dom)
+        r.ws(name)
+      }
+      return
+    }
+    if !ho || o.handler == nil || o.mods != n.mods {
+      r.op("L")
+      r.wi(v.dom)
+      r.ws(name)
+      r.ws(n.mods)
+    }
+    r.listeners[v.dom] = v
+    return
+  }
+  # value, checked and selected are properties the user changes: always set them
+  prop := name == "value" || name == "checked" || name == "selected"
+  oon := ho && o.on
+  non := hn && n.on
+  if !prop && oon == non && (!non || o.val == n.val) { return }
+  if non {
+    r.op("S")
+    r.wi(v.dom)
+    r.ws(name)
+    r.ws(n.val)
+  } else if oon || prop {
+    r.op("R")
+    r.wi(v.dom)
+    r.ws(name)
+  }
+}
+
+fn depth_of(v: *Node) -> int {
+  d := 0
+  p := v.parent
+  while p != nil {
+    d++
+    p = p.parent
+  }
+  return d
+}
+
+# where a component sits in the tree: "0:App/1:div/k7:Item". Used to give each component its
+# state back after a hot reload
+fn path_of(v: *Node) -> str {
+  segs := []str{}
+  c := v
+  while c.parent != nil {
+    p := c.parent
+    seg := ""
+    if c.has_key {
+      seg = "k" + c.key
+    } else if p.kind == K_COMP {
+      seg = "0"
+    } else {
+      seg = str(index_of(p.children, c))
+    }
+    if c.kind == K_COMP { seg = seg + ":" + c.cname }
+    if c.kind == K_ELEM { seg = seg + ":" + c.tag }
+    segs = append(segs, seg)
+    c = p
+  }
+  b := strings.Builder{}
+  for i := len(segs) - 1; i >= 0; i-- {
+    b.write(segs[i])
+    if i > 0 { b.write("/") }
+  }
+  return b.string()
+}
+
+# ---------------------------------------------------------------------------------------------
+# Events
+
+# runs the handler of an event on node id
+export fn (r: *Renderer) dispatch(id: int, e: *Event) {
+  R = r
+  v, ok := r.listeners[id]
+  if !ok { return }
+  let hd: any = nil
+  for i := 0; i < len(v.attrs); i++ {
+    if v.attrs[i].kind == A_EVENT && v.attrs[i].name == e.type { hd = v.attrs[i].handler }
+  }
+  if hd == nil { return }
+  defer fn() {
+    x := recover()
+    if x != nil { r.fail(e.type + " handler", x) }
+  }()
+  if f, ok0 := hd.(fn()); ok0 {
+    f()
+    return
+  }
+  if g, ok1 := hd.(fn(*Event)); ok1 {
+    g(e)
+    return
+  }
+  r.fail(e.type + " handler", "the handler must be fn() or fn(e: *ui.Event)")
+}
+
+fn (r: *Renderer) fire_timer(id: int) {
+  R = r
+  f, ok := r.timers[id]
+  if !ok { return }
+  if !r.repeat[id] {
+    delete(r.timers, id)
+    delete(r.repeat, id)
+  }
+  defer fn() {
+    x := recover()
+    if x != nil { r.fail("timer", x) }
+  }()
+  f()
+}
+
+struct Reader {
+  s: str
+  i: int
+}
+
+fn (rd: *Reader) num_() -> int {
+  n := 0
+  neg := false
+  if rd.i < len(rd.s) && int(rd.s[rd.i]) == '-' {
+    neg = true
+    rd.i++
+  }
+  while rd.i < len(rd.s) && int(rd.s[rd.i]) != ',' {
+    n = n * 10 + int(rd.s[rd.i]) - '0'
+    rd.i++
+  }
+  rd.i++
+  if neg { return -n }
+  return n
+}
+
+fn (rd: *Reader) str_() -> str {
+  if rd.i >= len(rd.s) { return "" }
+  n := 0
+  while rd.i < len(rd.s) && int(rd.s[rd.i]) != ':' {
+    n = n * 10 + int(rd.s[rd.i]) - '0'
+    rd.i++
+  }
+  rd.i++
+  s := rd.s[rd.i:rd.i + n]
+  rd.i += n
+  return s
+}
+
+fn (rd: *Reader) fnum() -> num {
+  s := rd.str_()
+  if s == "" { return 0.0 }
+  neg := false
+  i := 0
+  if int(s[0]) == '-' {
+    neg = true
+    i = 1
+  }
+  let v = 0.0
+  while i < len(s) && int(s[i]) != '.' {
+    v = v * 10.0 + num(int(s[i]) - '0')
+    i++
+  }
+  if i < len(s) {
+    i++
+    let f = 0.1
+    while i < len(s) {
+      v = v + f * num(int(s[i]) - '0')
+      f = f / 10.0
+      i++
+    }
+  }
+  if neg { return -v }
+  return v
+}
+
+# handles a batch of messages from the page (see the protocol at the top)
+export fn (r: *Renderer) handle(data: str) {
+  R = r
+  rd := &Reader{s: data}
+  while rd.i < len(data) {
+    k := int(data[rd.i])
+    rd.i++
+    if k == 'e' {
+      seq := rd.num_()
+      id := rd.num_()
+      e := &Event{}
+      e.type = rd.str_()
+      e.value = rd.str_()
+      e.checked = rd.num_() == 1
+      e.key = rd.str_()
+      e.x = rd.fnum()
+      e.y = rd.fnum()
+      e.target = id
+      r.seq = seq
+      r.dispatch(id, e)
+    } else if k == 't' {
+      r.fire_timer(rd.num_())
+    } else if k == 's' {
+      r.op("Z")
+      r.ws(r.snapshot())
+    } else if k == 'i' {
+      st := rd.str_()
+      page_data = rd.str_()
+      init_read = true
+      if st != "" {
+        let m: map[str][]any
+        if json.unmarshal(st, &m) == nil { r.restore = m }
+      }
+    } else {
+      return
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Hooks
+
+fn hook() -> (*Instance, int) {
+  inst := current
+  if inst == nil { panic("ui: hooks can only be called while a component renders") }
+  i := inst.hi
+  inst.hi++
+  return inst, i
+}
+
+fn (inst: *Instance) invalidate() {
+  if inst.dead || inst.dirty { return }
+  inst.dirty = true
+  R.dirty = append(R.dirty, inst)
+}
+
+# the value a hot reload saved for hook i of inst, or nil
+fn restored(inst: *Instance, i: int) -> any {
+  if R == nil || R.restore == nil { return nil }
+  vals, ok := R.restore[path_of(inst.vnode)]
+  if !ok || i >= len(vals) { return nil }
+  return vals[i]
+}
+
+fn as_int(v: any, def: int) -> int {
+  switch x := v.(type) {
+  case int: return x
+  case num: return int(x)
+  }
+  return def
+}
+
+# state of type int: s.v is the value, s.set(v) changes it and renders the component again
+export struct IntState {
+  v: int
+  inst: *Instance
+}
+export fn (s: *IntState) set(v: int) {
+  if v == s.v { return }
+  s.v = v
+  s.inst.invalidate()
+}
+export fn (s: *IntState) update(f: fn(int) -> int) { s.set(f(s.v)) }
+export fn use_int(init: int) -> *IntState {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*IntState) }
+  s := &IntState{v: as_int(restored(inst, i), init), inst: inst}
+  inst.hooks = append(inst.hooks, s)
+  return s
+}
+
+export struct StrState {
+  v: str
+  inst: *Instance
+}
+export fn (s: *StrState) set(v: str) {
+  if v == s.v { return }
+  s.v = v
+  s.inst.invalidate()
+}
+export fn use_str(init: str) -> *StrState {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*StrState) }
+  s := &StrState{v: init, inst: inst}
+  if x, ok := restored(inst, i).(str); ok { s.v = x }
+  inst.hooks = append(inst.hooks, s)
+  return s
+}
+
+export struct BoolState {
+  v: bool
+  inst: *Instance
+}
+export fn (s: *BoolState) set(v: bool) {
+  if v == s.v { return }
+  s.v = v
+  s.inst.invalidate()
+}
+export fn (s: *BoolState) toggle() { s.set(!s.v) }
+export fn use_bool(init: bool) -> *BoolState {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*BoolState) }
+  s := &BoolState{v: init, inst: inst}
+  if x, ok := restored(inst, i).(bool); ok { s.v = x }
+  inst.hooks = append(inst.hooks, s)
+  return s
+}
+
+export struct NumState {
+  v: num
+  inst: *Instance
+}
+export fn (s: *NumState) set(v: num) {
+  if v == s.v { return }
+  s.v = v
+  s.inst.invalidate()
+}
+export fn use_num(init: num) -> *NumState {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*NumState) }
+  s := &NumState{v: init, inst: inst}
+  switch x := restored(inst, i).(type) {
+  case num: s.v = x
+  case int: s.v = num(x)
+  }
+  inst.hooks = append(inst.hooks, s)
+  return s
+}
+
+# state of any type (a list, a struct...): read it with a type assertion, s.v.([]Todo). set
+# always renders again. Only str, int, num and bool values survive a hot reload
+export struct State {
+  v: any
+  inst: *Instance
+}
+export fn (s: *State) set(v: any) {
+  s.v = v
+  s.inst.invalidate()
+}
+export fn use_state(init: any) -> *State {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*State) }
+  s := &State{v: init, inst: inst}
+  rv := restored(inst, i)
+  switch init.(type) {
+  case int: s.v = as_int(rv, init.(int))
+  case str: if xs, ok := rv.(str); ok { s.v = xs }
+  case bool: if xb, okb := rv.(bool); okb { s.v = xb }
+  }
+  inst.hooks = append(inst.hooks, s)
+  return s
+}
+
+export struct EffectHook {
+  deps: []any
+  cleanup: fn()
+}
+
+fn same_deps(a: []any, b: []any) -> bool {
+  if len(a) != len(b) { return false }
+  for i := 0; i < len(a); i++ {
+    if a[i] != b[i] { return false }
+  }
+  return true
+}
+
+# runs f after the DOM is updated: on mount, and again whenever a value in deps changes (deps
+# nil: after every render; []any{}: only on mount). f returns a cleanup (or nil), run before the
+# next f and on unmount
+export fn use_effect(f: fn() -> fn(), deps: []any) {
+  inst, i := hook()
+  if i >= len(inst.hooks) {
+    hk := &EffectHook{deps: deps}
+    inst.hooks = append(inst.hooks, hk)
+    # effects never run on the server
+    if R.server { return }
+    R.effects = append(R.effects, &Pending{inst: inst, h: hk, f: f, depth: inst.depth})
+    return
+  }
+  hk := inst.hooks[i].(*EffectHook)
+  if deps == nil || !same_deps(hk.deps, deps) {
+    hk.deps = deps
+    R.effects = append(R.effects, &Pending{inst: inst, h: hk, f: f, depth: inst.depth})
+  }
+}
+
+# a box that keeps its value between renders (changing it does not render again)
+export struct Ref {
+  current: any
+}
+export fn use_ref(init: any) -> *Ref {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*Ref) }
+  rf := &Ref{current: init}
+  inst.hooks = append(inst.hooks, rf)
+  return rf
+}
+
+# a reference to an element: <canvas ref={r} />, then r.id names it (draw_rgba, focus)
+export fn use_element() -> *ElementRef {
+  inst, i := hook()
+  if i < len(inst.hooks) { return inst.hooks[i].(*ElementRef) }
+  rf := &ElementRef{}
+  inst.hooks = append(inst.hooks, rf)
+  return rf
+}
+
+struct MemoHook {
+  deps: []any
+  val: any
+}
+
+# f's result, computed again only when a value in deps changes
+export fn use_memo(f: fn() -> any, deps: []any) -> any {
+  inst, i := hook()
+  if i < len(inst.hooks) {
+    m := inst.hooks[i].(*MemoHook)
+    if deps != nil && same_deps(m.deps, deps) { return m.val }
+    m.deps = deps
+    m.val = f()
+    return m.val
+  }
+  m := &MemoHook{deps: deps, val: f()}
+  inst.hooks = append(inst.hooks, m)
+  return m.val
+}
+
+# ---------------------------------------------------------------------------------------------
+# Context
+
+export struct Context {
+  id: int
+  def: any
+}
+
+let contexts: int = 0
+
+# a value that components below a provider read with use_context, without passing props
+export fn create_context(def: any) -> *Context {
+  contexts++
+  return &Context{id: contexts, def: def}
+}
+
+# gives value to the components below (JSX: <ui.Provider ctx={theme} value={"dark"}>...)
+export fn provider(ctx: *Context, value: any, children: []*Node) -> *Node {
+  return &Node{kind: K_COMP, cname: "Provider#" + str(ctx.id), ctx: ctx, ctxval: value, children: fill(children)}
+}
+
+# the value of the nearest provider of ctx above the component, or its default
+export fn use_context(ctx: *Context) -> any {
+  if current == nil { panic("ui: hooks can only be called while a component renders") }
+  p := current.vnode.parent
+  while p != nil {
+    if p.kind == K_COMP && p.ctx == ctx { return p.ctxval }
+    p = p.parent
+  }
+  return ctx.def
+}
+
+# ---------------------------------------------------------------------------------------------
+# Timers, canvas, focus
+
+fn add_timer(ms: int, f: fn(), rep: bool) -> int {
+  if R.server { return 0 }
+  R.next_timer++
+  id := R.next_timer
+  R.timers[id] = f
+  R.repeat[id] = rep
+  R.op("M")
+  R.wi(id)
+  R.wi(ms)
+  if rep { R.wi(1) } else { R.wi(0) }
+  return id
+}
+
+# runs f every ms milliseconds until clear_timer(id)
+export fn set_interval(ms: int, f: fn()) -> int { return add_timer(ms, f, true) }
+
+# runs f once, ms milliseconds from now
+export fn set_timeout(ms: int, f: fn()) -> int { return add_timer(ms, f, false) }
+
+export fn clear_timer(id: int) {
+  if _, ok := R.timers[id]; !ok { return }
+  delete(R.timers, id)
+  delete(R.repeat, id)
+  R.op("C")
+  R.wi(id)
+}
+
+# runs f every ms milliseconds while the component is mounted (always the latest f)
+export fn use_interval(ms: int, f: fn()) {
+  latest := use_ref(nil)
+  latest.current = f
+  use_effect(fn() -> fn() {
+    id := set_interval(ms, fn() {
+      g := latest.current.(fn())
+      g()
+    })
+    return fn() { clear_timer(id) }
+  }, []any{ms})
+}
+
+# draws w×h RGBA pixels (4 bytes each, row by row) into the <canvas> el refers to
+export fn draw_rgba(el: *ElementRef, w: int, h: int, pixels: str) {
+  if el == nil || el.id == 0 { return }
+  R.op("P")
+  R.wi(el.id)
+  R.wi(w)
+  R.wi(h)
+  R.ws(pixels)
+}
+
+# moves the keyboard focus to the element el refers to
+export fn focus(el: *ElementRef) {
+  if el == nil || el.id == 0 { return }
+  R.op("F")
+  R.wi(el.id)
+}
+
+# ---------------------------------------------------------------------------------------------
+# Hot reload: the state of every component, by its place in the tree
+
+export fn (r: *Renderer) snapshot() -> str {
+  out := map[str]any{}
+  for _, ch := range r.root.children { snap(ch, out) }
+  s, err := json.marshal(out)
+  if err != nil { return "" }
+  return s
+}
+
+fn snap(v: *Node, out: map[str]any) {
+  if v.kind == K_ELEM || v.kind == K_FRAG {
+    for _, ch := range v.children { snap(ch, out) }
+    return
+  }
+  if v.kind != K_COMP || v.inst == nil { return }
+  inst := v.inst
+  vals := make([]any, len(inst.hooks))
+  some := false
+  for i, hk := range inst.hooks {
+    switch s := hk.(type) {
+    case *IntState:
+      vals[i] = s.v
+      some = true
+    case *StrState:
+      vals[i] = s.v
+      some = true
+    case *BoolState:
+      vals[i] = s.v
+      some = true
+    case *NumState:
+      vals[i] = s.v
+      some = true
+    case *State:
+      switch s.v.(type) {
+      case int, str, bool, num:
+        vals[i] = s.v
+        some = true
+      }
+    }
+  }
+  if some { out[path_of(v)] = vals }
+  if inst.rendered != nil { snap(inst.rendered, out) }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Mount
+
+let page_data: str = ""
+let init_batch: str = ""
+let init_read: bool = false
+
+# the first message from the page: the init
+fn read_init() {
+  if init_read { return }
+  data, err := os.read_file(DEVICE)
+  if err != nil {
+    os.eprintln("ui: no page to render into (" + err.Error() + "); run the app with caju-ui dev")
+    os.exit(1)
+  }
+  init_read = true
+  init_batch = data
+  rd := &Reader{s: data}
+  if len(data) > 0 && int(data[0]) == 'i' {
+    rd.i = 1
+    rd.str_()
+    page_data = rd.str_()
+  }
+}
+
+# the data the server put in the page (the data argument of ui.page), usually JSON to decode
+# into the props the server rendered with; "" without server rendering
+export fn data() -> str {
+  read_init()
+  return page_data
+}
+
+# renders root into the element matching selector and runs the program's event loop (never
+# returns while the page is open). Must run under the ui host (caju-ui dev / caju-ui build)
+export fn mount(selector: str, root: *Node) { run(selector, root, false) }
+
+# like mount, for a page whose HTML the server rendered (ui.page): keeps the server's elements and
+# makes them interactive, with the state the server rendered
+export fn hydrate(selector: str, root: *Node) { run(selector, root, true) }
+
+fn run(selector: str, root: *Node, hydrate: bool) {
+  r := new_renderer(selector, fn(batch: str) { os.write_file(DEVICE, batch, 420) })
+  read_init()
+  r.handle(init_batch)
+  defer fn() {
+    x := recover()
+    if x != nil {
+      r.fail("render", x)
+      r.send()
+    }
+  }()
+  if hydrate { r.hydrate(root) } else { r.render(root) }
+  r.restore = nil
+  while true {
+    data, err := os.read_file(DEVICE)
+    if err != nil { return }
+    r.handle(data)
+    r.work()
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Server rendering
+
+# the HTML of a tree, and the state of its components (for the page to start from)
+export struct Rendered {
+  html: str
+  state: str
+}
+
+struct Html {
+  b: *strings.Builder
+  text: bool          # the last thing written was text (two texts in a row need a separator)
+}
+
+const VOID = " area base br col embed hr img input link meta source track wbr "
+
+# renders node to HTML, natively, without a page: the components run with their initial state
+# (effects and timers do not run). The client takes over with ui.hydrate
+export fn render_to_string(node: *Node) -> *Rendered {
+  prev := R
+  r := &Renderer{out: &strings.Builder{}, next_id: 1, listeners: map[int]*Node{}, timers: map[int]fn(){}, repeat: map[int]bool{}, server: true}
+  r.root = &Node{kind: K_ELEM, tag: "#root", mounted: true}
+  R = r
+  if node == nil { node = empty() }
+  if node.mounted { node = clone(node) }
+  node.parent = r.root
+  r.root.children = []*Node{node}
+  w := &Html{b: &strings.Builder{}}
+  r.html(node, w)
+  out := &Rendered{html: w.b.string(), state: r.snapshot()}
+  R = prev
+  return out
+}
+
+fn (r: *Renderer) html(v: *Node, w: *Html) {
+  v.mounted = true
+  if v.kind == K_TEXT {
+    if v.text == "" { return }
+    if w.text { w.b.write("<!-- -->") }
+    w.b.write(escape(v.text, false))
+    w.text = true
+  } else if v.kind == K_ELEM {
+    w.text = false
+    w.b.write("<")
+    w.b.write(v.tag)
+    for i := 0; i < len(v.attrs); i++ {
+      at := &v.attrs[i]
+      if at.kind != A_ATTR || !at.on { continue }
+      w.b.write(" ")
+      w.b.write(at.name)
+      if at.val != "" {
+        w.b.write("=\"")
+        w.b.write(escape(at.val, true))
+        w.b.write("\"")
+      }
+    }
+    w.b.write(">")
+    if strings.contains(VOID, " " + v.tag + " ") { return }
+    for i := 0; i < len(v.children); i++ { r.html(r.prepare(v, i), w) }
+    w.b.write("</")
+    w.b.write(v.tag)
+    w.b.write(">")
+    w.text = false
+  } else if v.kind == K_FRAG {
+    for i := 0; i < len(v.children); i++ { r.html(r.prepare(v, i), w) }
+  } else {
+    inst := &Instance{vnode: v}
+    v.inst = inst
+    inst.depth = depth_of(v)
+    out := r.render_comp(inst)
+    if out.mounted { out = clone(out) }
+    out.parent = v
+    inst.rendered = out
+    r.html(out, w)
+  }
+}
+
+# s with the characters HTML gives a meaning escaped (and " too, inside an attribute)
+fn escape(s: str, attr: bool) -> str {
+  plain := true
+  for i := 0; i < len(s); i++ {
+    c := int(s[i])
+    if c == '&' || c == '<' || c == '>' || (attr && c == '"') { plain = false }
+  }
+  if plain { return s }
+  b := strings.Builder{}
+  for i := 0; i < len(s); i++ {
+    c := int(s[i])
+    if c == '&' { b.write("&amp;") } else if c == '<' { b.write("&lt;") } else if c == '>' { b.write("&gt;") } else if attr && c == '"' { b.write("&quot;") } else { b.write_byte(c) }
+  }
+  return b.string()
+}
+
+# JSON that is safe inside a <script> element
+fn script_safe(s: str) -> str { return strings.replace_all(s, "<", "\\u003c") }
+
+# a page: template (the index.html of caju-ui build, or of caju-ui dev) with node rendered inside
+# the element matching selector ("#id"), its components' state, and data for the client to read
+# with ui.data() (JSON, usually: the props the server rendered with)
+export fn page(template: str, selector: str, node: *Node, data: str) -> str {
+  rr := render_to_string(node)
+  out := template
+  at := -1
+  if strings.has_prefix(selector, "#") {
+    i := strings.index(out, "id=\"" + selector[1:] + "\"")
+    if i >= 0 { at = strings.index_from(out, ">", i) + 1 }
+  }
+  if at > 0 {
+    out = out[0:at] + rr.html + out[at:]
+  } else {
+    out = rr.html + out
+  }
+  scripts := "<script type=\"application/json\" id=\"__ui_state\">" + script_safe(rr.state) + "</script>\n<script type=\"application/json\" id=\"__ui_data\">" + script_safe(data) + "</script>\n"
+  k := strings.index(out, "<script>window.__UI__")
+  if k < 0 { k = strings.last_index(out, "</body>") }
+  if k < 0 { return out + scripts }
+  return out[0:k] + scripts + out[k:]
+}
