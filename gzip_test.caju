@@ -18,6 +18,16 @@ describe("gzip.compress", fn() {
     s := strings.repeat("<div class=\"card\">caju</div>", 400)
     expect(len(gzip.compress(s)) < len(s) / 10).to_equal(true)
   })
+  it("uses codes made for the text (dynamic Huffman) when they are shorter", fn() {
+    s := strings.repeat("<p class=\"lead\">Caju compiles to native code and WebAssembly.</p>\n", 50)
+    z := gzip.compress(s)
+    expect((int(z[10]) >> 1) & 3).to_equal(2)
+    expect(len(z) < 200).to_equal(true)
+  })
+  it("uses the fixed codes for a few bytes", fn() {
+    z := gzip.compress("hi")
+    expect((int(z[10]) >> 1) & 3).to_equal(1)
+  })
   it("knows when a client takes gzip", fn() {
     expect(gzip.accepted("gzip, deflate, br")).to_equal(true)
     expect(gzip.accepted("identity")).to_equal(false)
