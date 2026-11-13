@@ -1,11 +1,11 @@
 # ui
 
-A React-style UI library for [Caju](https://github.com/aecdanjundex/cajulang): components with
+A React-style UI library for [Caju](https://github.com/cajulang/cajulang): components with
 JSX-like syntax, hooks and a keyed virtual DOM, compiled to WebAssembly, with a dev server that hot
 reloads the page and keeps the components' state.
 
 ```caju
-import "github.com/aecdanjundex/ui"
+import "github.com/cajulang/ui"
 
 fn Counter() -> *ui.Node {
   count := ui.use_int(0)
@@ -21,7 +21,7 @@ ui.mount("#app", <Counter />)
 
 ```sh
 caju-ui new hello && cd hello
-caju pkg init && caju pkg add github.com/aecdanjundex/ui
+caju pkg init && caju pkg add github.com/cajulang/ui
 caju-ui dev            # http://localhost:5173: save a file and the page updates in place
 caju-ui build          # a static site in dist/
 ```
@@ -68,8 +68,8 @@ server.cajux   the server:   ssr.serve(...) + ui.page(...)
 
 ```caju
 # server.cajux
-import "github.com/aecdanjundex/ui"
-import "github.com/aecdanjundex/ui/ssr"
+import "github.com/cajulang/ui"
+import "github.com/cajulang/ui/ssr"
 import "std/http"
 import "std/json"
 import "./app"
@@ -83,7 +83,7 @@ ssr.serve("0.0.0.0", 8080, fn(req: *http.Request) -> str {
 
 ```caju
 # main.cajux
-import "github.com/aecdanjundex/ui"
+import "github.com/cajulang/ui"
 import "std/json"
 import "./app"
 
@@ -106,7 +106,7 @@ UI_DIST=dist ./server              # serves dist/ and renders every page
 | `ui.data()` | in the browser: the `data` the server passed to `ui.page` |
 | `ssr.serve(host, port, page)` | serves the build's files and, for other paths, `page(req)` (`""` is a 404); `PORT`, `UI_DIST`, `UI_TEMPLATE` override |
 | `ssr.template()`, `ssr.isolate(res)` | the page template; the headers every response needs (for your own `std/http` or `web` server) |
-| `gzip.compress(s)`, `gzip.compress_fast(s)`, `gzip.accepted(h)` | `import "github.com/aecdanjundex/ui/gzip"`: DEFLATE/gzip in Caju for `Content-Encoding: gzip` responses (dynamic Huffman codes; `compress` is the smallest, for files compressed once, `compress_fast` about 25% faster for a response made on each request) |
+| `gzip.compress(s)`, `gzip.compress_fast(s)`, `gzip.accepted(h)` | `import "github.com/cajulang/ui/gzip"`: DEFLATE/gzip in Caju for `Content-Encoding: gzip` responses (dynamic Huffman codes; `compress` is the smallest, for files compressed once, `compress_fast` about 25% faster for a response made on each request) |
 
 How hydration works: the server separates adjacent texts with `<!-- -->` (so the browser keeps them
 apart), and the client, instead of creating nodes, claims the next child of each parent (ops `h`

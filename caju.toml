@@ -1,5 +1,5 @@
 [package]
-name = "github.com/aecdanjundex/ui"
+name = "github.com/cajulang/ui"
 version = "0.1.0"
 description = "A React-style UI library for Caju: JSX-like components rendered from WebAssembly, with hot reload"
 license = "MIT"

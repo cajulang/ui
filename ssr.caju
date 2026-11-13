@@ -1,7 +1,7 @@
-# ssr: a server for pages rendered on the server (import "github.com/aecdanjundex/ui/ssr").
+# ssr: a server for pages rendered on the server (import "github.com/cajulang/ui/ssr").
 #
-#   import "github.com/aecdanjundex/ui"
-#   import "github.com/aecdanjundex/ui/ssr"
+#   import "github.com/cajulang/ui"
+#   import "github.com/cajulang/ui/ssr"
 #   import "std/http"
 #   import "./app"
 #

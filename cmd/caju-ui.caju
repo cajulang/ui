@@ -545,7 +545,7 @@ fn cmd_gen(m: *cli.Match) {
   if err != nil { die(err.Error()) }
 }
 
-const NEW_MAIN = "import \"github.com/aecdanjundex/ui\"\n\nfn App() -> *ui.Node {\n  count := ui.use_int(0)\n  return (\n    <main class=\"app\">\n      <h1>Hello from Caju</h1>\n      <button onClick={fn() { count.set(count.v + 1) }}>\n        clicked {count.v} times\n      </button>\n      <p>Edit main.cajux and save: the page updates and keeps the count.</p>\n    </main>\n  )\n}\n\nui.mount(\"#app\", <App />)\n"
+const NEW_MAIN = "import \"github.com/cajulang/ui\"\n\nfn App() -> *ui.Node {\n  count := ui.use_int(0)\n  return (\n    <main class=\"app\">\n      <h1>Hello from Caju</h1>\n      <button onClick={fn() { count.set(count.v + 1) }}>\n        clicked {count.v} times\n      </button>\n      <p>Edit main.cajux and save: the page updates and keeps the count.</p>\n    </main>\n  )\n}\n\nui.mount(\"#app\", <App />)\n"
 
 const NEW_CSS = "body { font-family: system-ui, sans-serif; margin: 0; display: grid; place-items: center; min-height: 100vh; }\n.app { text-align: center; }\nbutton { font-size: 1.1rem; padding: .6rem 1.2rem; border-radius: .5rem; border: 1px solid #ccc; cursor: pointer; }\n"
 
@@ -556,7 +556,7 @@ fn cmd_new(m: *cli.Match) {
   fs.write_file(filepath.join(name, "main.cajux"), NEW_MAIN, 420)
   fs.write_file(filepath.join(name, "public/style.css"), NEW_CSS, 420)
   fs.write_file(filepath.join(name, ".gitignore"), ".ui/\ndist/\n# generated from the .cajux files\n*.caju\n", 420)
-  print("created " + name + "/. Next:\n  cd " + name + "\n  caju pkg init && caju pkg add github.com/aecdanjundex/ui\n  caju-ui dev")
+  print("created " + name + "/. Next:\n  cd " + name + "\n  caju pkg init && caju pkg add github.com/cajulang/ui\n  caju-ui dev")
 }
 
 fn die(msg: str) {
