@@ -106,7 +106,7 @@ UI_DIST=dist ./server              # serves dist/ and renders every page
 | `ui.data()` | in the browser: the `data` the server passed to `ui.page` |
 | `ssr.serve(host, port, page)` | serves the build's files and, for other paths, `page(req)` (`""` is a 404); `PORT`, `UI_DIST`, `UI_TEMPLATE` override |
 | `ssr.template()`, `ssr.isolate(res)` | the page template; the headers every response needs (for your own `std/http` or `web` server) |
-| `gzip.compress(s)`, `gzip.accepted(h)` | `import "github.com/aecdanjundex/ui/gzip"`: DEFLATE/gzip in Caju for `Content-Encoding: gzip` responses (fixed Huffman codes: about 20% larger than `gzip -9`) |
+| `gzip.compress(s)`, `gzip.compress_fast(s)`, `gzip.accepted(h)` | `import "github.com/aecdanjundex/ui/gzip"`: DEFLATE/gzip in Caju for `Content-Encoding: gzip` responses (dynamic Huffman codes; `compress` is the smallest, for files compressed once, `compress_fast` about 25% faster for a response made on each request) |
 
 How hydration works: the server separates adjacent texts with `<!-- -->` (so the browser keeps them
 apart), and the client, instead of creating nodes, claims the next child of each parent (ops `h`
@@ -134,6 +134,10 @@ paint (~40 ms) and hydration adds no DOM nodes.
 Children can be any of `*ui.Node`, `[]*ui.Node`, `str`, `int`, `num`, `bool` (renders nothing) or
 `nil`. Caju has no `?:` or `&&` on nodes: use `ui.when(cond, node)`, `ui.either(cond, a, b)`,
 `ui.each(n, fn(i: int) -> *ui.Node {...})`, or build a `[]*ui.Node` in a loop.
+
+Form fields work as in React: with `onInput` or `onChange`, `value={x}` (or `checked`) is
+controlled, set again on every render; without them the field is uncontrolled, and `value` is only
+its starting value, so what the user types stays (a plain `<form method="post">` works that way).
 
 ## API
 

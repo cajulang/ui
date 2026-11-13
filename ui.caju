@@ -915,8 +915,10 @@ fn (r: *Renderer) set_attr(v: *Node, o: *Attr, n: *Attr) {
     r.listeners[v.dom] = v
     return
   }
-  # value, checked and selected are properties the user changes: always set them
-  prop := name == "value" || name == "checked" || name == "selected"
+  # value and checked are properties the user changes. A controlled field (one that listens to
+  # input or change, as React's) gets them on every render; an uncontrolled one only when they
+  # change, so what the user typed or picked stays (selected: always as an attribute)
+  prop := (name == "value" || name == "checked") && controlled(v)
   oon := ho && o.on
   non := hn && n.on
   if !prop && oon == non && (!non || o.val == n.val) { return }
@@ -930,6 +932,15 @@ fn (r: *Renderer) set_attr(v: *Node, o: *Attr, n: *Attr) {
     r.wi(v.dom)
     r.ws(name)
   }
+}
+
+# does the element listen to its value changing (onInput / onChange)?
+fn controlled(v: *Node) -> bool {
+  for i := 0; i < len(v.attrs); i++ {
+    a := v.attrs[i]
+    if a.kind == A_EVENT && a.handler != nil && (a.name == "input" || a.name == "change") { return true }
+  }
+  return false
 }
 
 fn depth_of(v: *Node) -> int {

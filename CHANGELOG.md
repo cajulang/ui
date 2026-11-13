@@ -24,8 +24,22 @@ All notable changes to this project are documented here. The format follows
 - `gzip` module: gzip compression in Caju for HTTP responses.
 - `caju-ui build --base`: the runtime's paths are absolute (`/__ui/...` by default), so pages at
   any depth find it; the runtime script is loaded with `defer`.
+- `gzip.compress_fast(s)`: a fast level (short hash chains, no lazy matching) for responses made on
+  every request; `gzip.compress` stays the smallest, for what is compressed once.
+
+### Changed
+
+- `value` and `checked` are controlled only when the element listens to `input` or `change` (as in
+  React): an uncontrolled field keeps what the user typed when its component renders again, instead
+  of going back to the rendered value. `selected` is set only when it changes.
+- `gzip`: length and distance codes from tables, canonical codes kept bit-reversed and Huffman
+  codes built from two queues (no allocation per merge): about 20% faster.
 
 ### Fixed
+
+- Hydration keeps what the user typed, checked or picked in a field before the program started
+  (the page used to put the server's value back, and a fast typist lost the input); the program
+  gets an `input`/`change` event with the field's value.
 
 - `caju-ui build` copies `public/` into the build (it copied nothing when the output existed).
 - `caju-ui build --ssr` and `dev --ssr` replace a running server binary ("text file busy").

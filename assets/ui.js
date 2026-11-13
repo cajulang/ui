@@ -45,6 +45,26 @@
     Atomics.notify(ctl, 0)
   }
 
+  // has the user changed this form field (typed, checked, picked) since the page loaded?
+  function edited(el) {
+    const tag = el.tagName
+    if (tag === "INPUT") {
+      if (el.type === "checkbox" || el.type === "radio") return el.checked !== el.defaultChecked
+      return el.value !== el.defaultValue
+    }
+    if (tag === "TEXTAREA") return el.value !== el.defaultValue
+    if (tag === "SELECT") for (const o of el.options) if (o.selected !== o.defaultSelected) return true
+    return false
+  }
+
+  // hydration leaves a field the user changed as it is (its options' selected too)
+  function kept(el, name) {
+    if (name !== "value" && name !== "checked" && name !== "selected") return false
+    if (el.__kept) return true
+    const sel = el.tagName === "OPTION" && el.closest && el.closest("select")
+    return !!(sel && sel.__kept)
+  }
+
   // ---- events --------------------------------------------------------------------------------
   function onEvent(ev) {
     const el = ev.currentTarget
@@ -125,6 +145,12 @@
           if (fits) {
             cursor.set(pid, n.nextSibling)
             if (op === 106 && n.data !== v) n.data = v
+            // a field the user changed before the program started: hydration keeps what they
+            // typed or picked (the program learns it from an input/change event, see L)
+            if (op === 104 && edited(n)) {
+              n.__kept = true
+              setTimeout(() => { n.__kept = false }, 0)
+            }
           } else {
             // the server's HTML differs here: create the node (and warn, in development)
             if (cfg.dev && !hotStart) console.warn("caju-ui: hydration mismatch in", parent, "expected", op === 104 ? "<" + v + ">" : JSON.stringify(v), "found", n)
@@ -193,6 +219,7 @@
         }
         case 83: {                                                         // S
           const el = nodes.get(num()), name = str(), v = str()
+          if (kept(el, name)) break
           if (name === "value") {
             // the user is typing in it faster than the program answers: keep what they typed
             if (el.__typed > answered && document.activeElement === el) break
@@ -206,6 +233,7 @@
         }
         case 82: {                                                         // R
           const el = nodes.get(num()), name = str()
+          if (kept(el, name)) break
           if (name === "value") el.value = ""
           else if (name === "checked" || name === "selected") el[name] = false
           el.removeAttribute(name)
@@ -226,6 +254,7 @@
           const el = nodes.get(num()), type = str(), mods = str()
           ;(el.__mods || (el.__mods = {}))[type] = mods
           el.addEventListener(type, onEvent)
+          if (el.__kept && (type === "input" || type === "change")) setTimeout(() => el.dispatchEvent(new Event(type, { bubbles: true })), 0)
           break
         }
         case 85: {                                                         // U

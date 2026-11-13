@@ -1,7 +1,22 @@
 import { describe, it, expect } from "std/testing"
 import "std/strings"
 import "std/hash"
+import "std/os"
+import "std/fs"
 import "gzip"
+
+# what the system's gzip makes of z ("" when there is no gzip here)
+fn gunzip(z: str) -> str {
+  if os.look_path("gzip") == "" { return "" }
+  dir, err := fs.temp_dir("", "caju-gzip")
+  if err != nil { return "" }
+  f := dir + "/x.gz"
+  fs.write_file(f, z, 420)
+  p, perr := os.run([]str{"gzip", "-dc", f}, nil, false)
+  fs.remove_all(dir)
+  if perr != nil || p.code != 0 { return "gzip failed" }
+  return p.output
+}
 
 describe("gzip.compress", fn() {
   it("writes the gzip header and the trailer (CRC-32 and size)", fn() {
@@ -13,6 +28,16 @@ describe("gzip.compress", fn() {
     crc := int(z[n - 8]) | (int(z[n - 7]) << 8) | (int(z[n - 6]) << 16) | (int(z[n - 5]) << 24)
     expect(crc).to_equal(hash.crc32("hello") & 0xFFFFFFFF)
     expect(int(z[n - 4])).to_equal(5)
+  })
+  it("round-trips through the system's gzip, at both levels", fn() {
+    b := strings.Builder{}
+    for i := 0; i < 3000; i++ { b.write("<li class=\"item-" + str(i % 17) + "\">caju " + str(i * 7919 % 1000) + "</li>\n") }
+    s := b.string()
+    if os.look_path("gzip") == "" { return }
+    expect(gunzip(gzip.compress(s)) == s).to_equal(true)
+    expect(gunzip(gzip.compress_fast(s)) == s).to_equal(true)
+    expect(gunzip(gzip.compress_fast("")) == "").to_equal(true)
+    expect(len(gzip.compress_fast(s)) < len(s) / 4).to_equal(true)
   })
   it("compresses repeated text", fn() {
     s := strings.repeat("<div class=\"card\">caju</div>", 400)

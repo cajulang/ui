@@ -236,6 +236,23 @@ describe("events", fn() {
     r.handle("e7," + str(id) + ",7:keydown3:abc0,5:Enter4:12.51:3")
     expect(got).to_equal("abc|Enter")
   })
+  it("set value again on every render only for controlled fields", fn() {
+    r, d := setup()
+    # uncontrolled (no onInput): what the user typed stays when something else renders
+    r.render(ui.h("input", []ui.Attr{ui.a("value", "")}, nil))
+    ops := d.ops
+    r.render(ui.h("input", []ui.Attr{ui.a("value", "")}, nil))
+    expect(d.ops).to_equal(ops)
+    r.render(ui.h("input", []ui.Attr{ui.a("value", "new")}, nil))
+    expect(d.ops > ops).to_equal(true)
+    # controlled: the program's value wins on every render
+    r2, d2 := setup()
+    handler := fn(e: *ui.Event) {}
+    r2.render(ui.h("input", []ui.Attr{ui.a("value", "x"), ui.on("input", handler)}, nil))
+    ops2 := d2.ops
+    r2.render(ui.h("input", []ui.Attr{ui.a("value", "x"), ui.on("input", handler)}, nil))
+    expect(d2.ops > ops2).to_equal(true)
+  })
   it("copy text to the clipboard from a handler", fn() {
     r, d := setup()
     r.render(ui.h("button", []ui.Attr{ui.on("click", fn() { ui.copy("caju run x.caju") })}, nil))
