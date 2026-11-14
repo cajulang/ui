@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-14
+
+### Changed
+
+- Needs Caju 0.6.0 (`caju = "0.6.0"` in caju.toml).
+- `caju-ui dev --ssr` asks the app's server for pages with `std/http`'s client instead of its own
+  HTTP code: responses in chunks or without Content-Length are read whole, and a server that does
+  not answer gives an error after 30 seconds instead of hanging.
+
+## [0.1.0] - 2026-11-13
+
 ### Added
 
 - `ui.caju`: components, typed state hooks, effects, memo, refs, context, timers, a keyed virtual
@@ -43,3 +54,7 @@ All notable changes to this project are documented here. The format follows
 
 - `caju-ui build` copies `public/` into the build (it copied nothing when the output existed).
 - `caju-ui build --ssr` and `dev --ssr` replace a running server binary ("text file busy").
+
+[Unreleased]: https://github.com/cajulang/ui/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cajulang/ui/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/cajulang/ui/releases/tag/v0.1.0

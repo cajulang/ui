@@ -24,7 +24,7 @@ import filepath "std/path"
 import "../jsx"
 import "./assets"
 
-const VERSION = "0.1.0"
+const VERSION = "0.2.0"
 const WORK = ".ui"
 
 # ---------------------------------------------------------------------------------------------
@@ -360,52 +360,16 @@ fn (d: *Dev) restart_server() {
 # the page from the app's server: (status, body, error)
 fn (d: *Dev) render_page(target: str) -> (int, str, str) {
   fs.write_file(filepath.join(d.dir, WORK + "/index.html"), d.page_template(), 420)
-  let c: *net.Conn
+  # the server may still be starting: try for about 5 seconds
+  url := "http://127.0.0.1:" + str(d.ssr_port) + target
   for i := 0; i < 50; i++ {
-    conn, err := net.dial("127.0.0.1", d.ssr_port)
-    if err == nil {
-      c = conn
-      break
-    }
+    r, err := http.request(&http.ClientRequest{url: url, headers: map[str]str{"Connection": "close"}, no_redirects: true, timeout_ms: 30000})
+    if err == nil { return r.status, r.body, "" }
+    if !strings.contains(err.Error(), "connection refused") { return 0, "", "the app's server: " + err.Error() }
     sleep(0.1)
   }
-  if c == nil {
-    log, _ := fs.read_file(filepath.join(d.dir, WORK + "/server.log"))
-    return 0, "", "the app's server (" + d.ssr + ") is not answering on port " + str(d.ssr_port) + "\n" + log
-  }
-  c.write("GET " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-  b := strings.Builder{}
-  want := -1
-  head := 0
-  while true {
-    chunk, err := c.read(65536)
-    if err != nil || chunk == "" { break }
-    b.write(chunk)
-    if want < 0 {
-      got := b.string()
-      k := strings.index(got, "\r\n\r\n")
-      if k >= 0 {
-        head = k + 4
-        for _, line := range strings.split(got[0:k], "\r\n") {
-          if strings.has_prefix(strings.to_lower(line), "content-length:") {
-            n, cerr := strconv.atoi(strings.trim_space(line[15:]))
-            if cerr == nil { want = n }
-          }
-        }
-      }
-    }
-    if want >= 0 && b.len() >= head + want { break }
-  }
-  c.close()
-  resp := b.string()
-  if head == 0 { return 0, "", "the app's server sent an invalid response" }
-  status := 200
-  parts := strings.split(resp[0:strings.index(resp, "\r\n")], " ")
-  if len(parts) > 1 {
-    n, serr := strconv.atoi(parts[1])
-    if serr == nil { status = n }
-  }
-  return status, resp[head:], ""
+  log, _ := fs.read_file(filepath.join(d.dir, WORK + "/server.log"))
+  return 0, "", "the app's server (" + d.ssr + ") is not answering on port " + str(d.ssr_port) + "\n" + log
 }
 
 fn (d: *Dev) serve(req: *http.Request, res: *http.Response) {

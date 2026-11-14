@@ -163,7 +163,7 @@ holding a `str`, `int`, `num` or `bool`.
 ## Examples
 
 ```sh
-caju build -o build/caju-ui cmd/caju-ui.caju       # the command line (needs caju 0.5.0)
+caju build -o build/caju-ui cmd/caju-ui.caju       # the command line (needs caju 0.6.0)
 cd examples/counter && ../../build/caju-ui dev      # state, events, an effect
 cd examples/todo && ../../build/caju-ui dev         # props, a keyed list, a form, a context
 cd examples/mandelbrot && ../../build/caju-ui dev   # CPU work in the worker, drawn on a canvas
