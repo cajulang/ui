@@ -276,6 +276,54 @@ describe("events", fn() {
     click(r, d.root.children[0].id)
     expect(d.calls).to_equal([]str{"1 ui.navigate /busca?q=caju"})
   })
+  it("deliver page events to their listeners, which can change state and stop listening", fn() {
+    r, d := setup()
+    got := []str{}
+    let label: *ui.StrState = nil
+    App := fn() -> *ui.Node {
+      label = ui.use_str("none")
+      return ui.h("p", nil, []*ui.Node{ui.text(label.v)})
+    }
+    r.render(ui.c0("App", App))
+    off := ui.on_page_event("ui.eth.chainChanged", fn(data: str) {
+      got = append(got, data)
+      label.set(data)
+    })
+    ui.on_page_event("other", fn(data: str) { got = append(got, "other " + data) })
+    r.handle(fakedom.event_msg("ui.eth.chainChanged", "{\"id\":\"w\",\"data\":\"0x1\"}") + fakedom.event_msg("other", ""))
+    r.work()
+    expect(got).to_equal([]str{"{\"id\":\"w\",\"data\":\"0x1\"}", "other "})
+    expect(d.html()).to_equal("<p>{\"id\":\"w\",\"data\":\"0x1\"}</p>")
+    off()
+    off()
+    r.handle(fakedom.event_msg("ui.eth.chainChanged", "x") + fakedom.event_msg("nobody", "y"))
+    expect(len(got)).to_equal(2)
+  })
+  it("report a panicking page event listener and still run the others", fn() {
+    r, d := setup()
+    r.render(el("div", nil))
+    n := 0
+    a := ui.on_page_event("boom", fn(data: str) { panic("bad " + data) })
+    b := ui.on_page_event("boom", fn(data: str) { n++ })
+    r.handle(fakedom.event_msg("boom", "1"))
+    r.work()
+    expect(n).to_equal(1)
+    expect(len(d.errors)).to_equal(1)
+    a()
+    b()
+  })
+  it("call the page's wallet bridge (ui.eth.*) and read its replies", fn() {
+    r, d := setup()
+    r.render(el("div", nil))
+    got := ""
+    ui.call("ui.eth.request", "{\"id\":\"injected\",\"method\":\"eth_chainId\",\"params\":[]}", fn(s: str) { got = s })
+    r.work()
+    id, name, arg := d.call_at(0)
+    expect(name).to_equal("ui.eth.request")
+    expect(arg).to_equal("{\"id\":\"injected\",\"method\":\"eth_chainId\",\"params\":[]}")
+    r.handle(fakedom.reply_msg(id, "{\"result\":\"0x1\"}"))
+    expect(got).to_equal("{\"result\":\"0x1\"}")
+  })
   it("report a panicking handler instead of crashing", fn() {
     r, d := setup()
     r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { panic("boom") })}, nil))

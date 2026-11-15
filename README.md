@@ -158,16 +158,46 @@ its starting value, so what the user types stays (a plain `<form method="post">`
 | `ui.copy(text)` | copies text to the clipboard (from an event handler) |
 | `ui.call(name, arg, fn(reply: str) {...})` | calls `window.__UI_FNS__[name](arg, reply)` on the page, for browser APIs the worker lacks (storage, history, cookies, other workers); every `reply(text)` runs the callback |
 | `ui.navigate(url)` | goes to another page (`location.assign`) |
+| `ui.on_page_event(name, fn(data: str) {...})` | runs the handler each time the page sends the event `name` (see [Page events](#page-events)); returns a function that stops listening |
 | `ui.in_page()`, `ui.on_server()` | the program runs in the page (after `mount`/`hydrate`); a component is rendering on the server (`render_to_string`) |
 | `ui.ssr_put(key, value)`, `ui.ssr_get(key)` | values that server rendering hands to hydration: kept while rendering on the server, put in the page by `ui.page`, and given back in the browser while it hydrates (for libraries such as [fetch](https://github.com/cajulang/fetch), so what the server loaded is not loaded again) |
 
 The page has built-in functions for `ui.call`, so apps need no JavaScript of their own for them:
 `ui.fetch` (the browser's `fetch` with an `AbortController` for cancel and timeout; HTTP requests
 from components go through it with [github.com/cajulang/fetch](https://github.com/cajulang/fetch)),
-`ui.fetch.abort` and `ui.navigate`.
+`ui.fetch.abort`, `ui.navigate` and the wallet bridge `ui.eth.*` (below).
 
 State that survives a hot reload: `use_int`, `use_str`, `use_bool`, `use_num`, and `use_state`
 holding a `str`, `int`, `num` or `bool`.
+
+### Page events
+
+`ui.call` is the program asking the page; a **page event** is the page telling the program
+something on its own: a wallet switched accounts, a message from another tab. The page sends the
+message `v name data` (data is text, usually JSON), and every handler registered for that name
+runs, like an event handler (state they change renders again afterwards; a panic is reported and
+the other handlers still run):
+
+```caju
+off := ui.on_page_event("ui.eth.chainChanged", fn(data: str) { ... })
+off()   # stop listening
+```
+
+The app's own page code sends them with `window.__UI_EMIT__(name, data)`, for example from a
+`window.__UI_FNS__` function that subscribes to some browser API.
+
+### Wallets (EIP-1193)
+
+The page runtime finds the browser's Ethereum wallets with EIP-6963 (it listens for
+`eip6963:announceProvider` and asks with `eip6963:requestProvider` when it loads) and gives the
+program three built-in page functions. [github.com/cajulang/web3](https://github.com/cajulang/web3)'s
+`wallet` module is the Caju API over them; the protocol is:
+
+| `ui.call` | argument | reply |
+|---|---|---|
+| `ui.eth.providers` | `""` or `{"wait_ms": 50}` (how long to wait for wallets to announce) | `[{id, name, icon, rdns, is_metamask}]`: each announced wallet (`id` is its EIP-6963 uuid, `icon` a data URI), plus `{id: "injected", name: "Injected (window.ethereum)", ...}` when `window.ethereum` exists and is none of them |
+| `ui.eth.request` | `{id, method, params}` | `{result}`, or `{error: {code, message, data}}` with the wallet's EIP-1193 error (4001 user rejected, 4902 unknown chain, 4900 no such provider...) |
+| `ui.eth.subscribe` | `{id}` | `{ok: true}`; from then on the wallet's events arrive as the page events `ui.eth.accountsChanged` (`{id, data: [addresses]}`), `ui.eth.chainChanged` (`{id, data: "0x1"}`), `ui.eth.connect` (`{id, data: {chain_id}}`) and `ui.eth.disconnect` (`{id, data: {code, message, data}}`) |
 
 ## Examples
 
@@ -200,6 +230,7 @@ In short:
 ```sh
 caju test                          # runtime (fake DOM) and .cajux compiler tests
 node tools/embed.mjs               # after changing assets/: embeds them in cmd/assets.caju
+node tools/eth-check.mjs           # the page runtime's wallet bridge, with fake wallets
 caju build -o build/caju-ui cmd/caju-ui.caju
 ```
 

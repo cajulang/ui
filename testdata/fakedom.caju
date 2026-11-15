@@ -228,3 +228,23 @@ export fn (d: *Dom) ids(parent: int) -> []int {
   for _, c := range d.nodes[parent].children { out = append(out, c.id) }
   return out
 }
+
+# the i-th ui.call the page got (op J): its call id, the page function's name and the argument
+export fn (d: *Dom) call_at(i: int) -> (int, str, str) {
+  c := d.calls[i]
+  a := strings.index(c, " ")
+  b := a + 1 + strings.index(c[a + 1:], " ")
+  id := 0
+  for k := 0; k < a; k++ { id = id * 10 + int(c[k]) - '0' }
+  return id, c[a + 1:b], c[b + 1:]
+}
+
+# the page's message answering the ui.call with this id (give it to Renderer.handle)
+export fn reply_msg(id: int, text: str) -> str {
+  return "c" + str(id) + "," + str(len(text)) + ":" + text
+}
+
+# the page's message for a page event (ui.on_page_event)
+export fn event_msg(name: str, data: str) -> str {
+  return "v" + str(len(name)) + ":" + name + str(len(data)) + ":" + data
+}

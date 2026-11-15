@@ -38,7 +38,8 @@
 #                     F id         focus a node
 #                     W text       copy text to the clipboard
 #                     J id fn arg  call the page's function fn (window.__UI_FNS__[fn](arg, reply),
-#                                  or a built-in one: ui.fetch, ui.fetch.abort, ui.navigate)
+#                                  or a built-in one: ui.fetch, ui.fetch.abort, ui.navigate,
+#                                  ui.eth.providers, ui.eth.request, ui.eth.subscribe)
 #                     Z json       the state snapshot asked for by a hot reload
 #                     ! text       an error to show (a panic in a component or handler)
 #   page -> program   i state data values   init: the components' state to restore (after a hot
@@ -48,6 +49,8 @@
 #                     t id         a timer fired
 #                     s            take a state snapshot (a hot reload is coming)
 #                     c id text    a reply of the page's function called with J id
+#                     v name data  a page event (on_page_event): something the page tells the
+#                                  program on its own, e.g. a wallet's accountsChanged
 
 import "std/os"
 import "std/strings"
@@ -1116,6 +1119,9 @@ export fn (r: *Renderer) handle(data: str) {
     } else if k == 'c' {
       id := rd.num_()
       r.reply(id, rd.str_())
+    } else if k == 'v' {
+      name := rd.str_()
+      r.page_event(name, rd.str_())
     } else if k == 'i' {
       st := rd.str_()
       page_data = rd.str_()
@@ -1442,7 +1448,8 @@ export fn copy(text: str) {
 # (the browser's APIs: storage, history, cookies, other workers...). Each reply(text) the page
 # makes runs cb with it (cb nil: no reply wanted). Does nothing on the server. The page also has
 # built-in functions: "ui.fetch" (the browser's fetch, used by github.com/cajulang/fetch),
-# "ui.fetch.abort" and "ui.navigate" (see navigate)
+# "ui.fetch.abort", "ui.navigate" (see navigate) and the EIP-1193 wallet bridge "ui.eth.providers",
+# "ui.eth.request" and "ui.eth.subscribe" (used by github.com/cajulang/web3/wallet)
 export fn call(name: str, arg: str, cb: fn(str)) {
   if R.server { return }
   if R.calls == nil { R.calls = map[int]fn(str){} }
@@ -1465,6 +1472,55 @@ fn (r: *Renderer) reply(id: int, text: str) {
     if x != nil { r.fail("ui.call reply", x) }
   }()
   cb(text)
+}
+
+# ---------------------------------------------------------------------------------------------
+# Page events: what the page tells the program on its own (not a reply to a call)
+
+struct PageListener {
+  f: fn(str)
+  off: bool
+}
+
+let page_listeners: map[str][]*PageListener = nil
+
+# runs f(data) every time the page sends the event name (protocol message "v name data"; data is
+# text, usually JSON). The page's built-in bridges send them (ui.eth.subscribe: "ui.eth.accountsChanged",
+# "ui.eth.chainChanged", "ui.eth.connect", "ui.eth.disconnect"), and so can the app's own page code,
+# with window.__UI_EMIT__(name, data). Returns a function that stops listening. The handlers run
+# like event handlers: the components whose state they change render again afterwards
+export fn on_page_event(name: str, f: fn(str)) -> fn() {
+  if page_listeners == nil { page_listeners = map[str][]*PageListener{} }
+  l := &PageListener{f: f}
+  page_listeners[name] = append(page_listeners[name], l)
+  return fn() {
+    if l.off { return }
+    l.off = true
+    keep := []*PageListener{}
+    for _, x := range page_listeners[name] {
+      if x != l { keep = append(keep, x) }
+    }
+    if len(keep) == 0 { delete(page_listeners, name) } else { page_listeners[name] = keep }
+  }
+}
+
+# delivers a page event to its listeners (each one's panic is reported, the others still run)
+export fn (r: *Renderer) page_event(name: str, data: str) {
+  R = r
+  if page_listeners == nil { return }
+  ls, ok := page_listeners[name]
+  if !ok { return }
+  for _, l := range ls {
+    if !l.off { r.run_page_listener(name, l, data) }
+  }
+}
+
+fn (r: *Renderer) run_page_listener(name: str, l: *PageListener, data: str) {
+  defer fn() {
+    x := recover()
+    if x != nil { r.fail("page event " + name, x) }
+  }()
+  l.f(data)
 }
 
 # goes to another page (location.assign(url)): a full navigation, as a link would do. Does nothing

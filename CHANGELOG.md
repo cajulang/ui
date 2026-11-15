@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
+### Added
+
+- Page events: `ui.on_page_event(name, fn(data: str))` runs a handler each time the page sends
+  the event `name` (new protocol message `v name data`), and returns a function that stops
+  listening. The page's built-in bridges send them, and so can the app's own page code with
+  `window.__UI_EMIT__(name, data)`.
+- An EIP-1193 wallet bridge in the page runtime, for
+  [github.com/cajulang/web3](https://github.com/cajulang/web3)'s wallet client:
+  `ui.eth.providers` lists the wallets found with EIP-6963 (and `window.ethereum` as `injected`
+  when no announced wallet is it), `ui.eth.request` calls a wallet's `request({method, params})`
+  and answers `{result}` or `{error: {code, message, data}}`, and `ui.eth.subscribe` forwards its
+  `accountsChanged`, `chainChanged`, `connect` and `disconnect` events as the page events
+  `ui.eth.<event>` with `{id, data}`.
+- `testdata/fakedom`: `Dom.call_at(i)`, `reply_msg(id, text)` and `event_msg(name, data)`, for
+  testing libraries that talk to the page.
+- `tools/eth-check.mjs`: checks the wallet bridge in node with fake wallets.
+
+### Fixed
+
+- A reply to `ui.call` that arrives after a hot reload is dropped instead of reaching the new
+  program under a call id it may be using for something else.
+
 ## [0.3.0] - 2026-11-15
 
 ### Added
@@ -74,7 +98,8 @@ All notable changes to this project are documented here. The format follows
 - `caju-ui build` copies `public/` into the build (it copied nothing when the output existed).
 - `caju-ui build --ssr` and `dev --ssr` replace a running server binary ("text file busy").
 
-[Unreleased]: https://github.com/cajulang/ui/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cajulang/ui/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cajulang/ui/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cajulang/ui/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cajulang/ui/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cajulang/ui/releases/tag/v0.1.0

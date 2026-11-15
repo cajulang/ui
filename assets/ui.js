@@ -19,6 +19,7 @@
   let answered = 0          // the last event the program has answered
   let snapshotWait = null
   let hotStart = false       // a hot reload hydrates over the previous program's DOM: no warnings
+  let gen = 0               // which program is running (each start is a new one)
 
   if (typeof SharedArrayBuffer === "undefined" || !self.crossOriginIsolated) {
     fatal("caju-ui needs a cross-origin isolated page (SharedArrayBuffer). Serve it with the headers\n" +
@@ -90,6 +91,11 @@
     t.remove()
   }
 
+  // ---- page events (ui.on_page_event) ---------------------------------------------------------
+  // something the page tells the program on its own; the app's page code can send them too
+  function emit(name, data) { send("v" + S(String(name)) + S(data == null ? "" : String(data))) }
+  window.__UI_EMIT__ = emit
+
   // ---- built-in page functions (ui.call) -----------------------------------------------------
   // ui.fetch: the browser's fetch for the program (github.com/cajulang/fetch). The argument is
   // JSON {id, method, url, headers, body, timeout_ms}; the reply is JSON {status, status_text,
@@ -123,6 +129,86 @@
     },
     "ui.fetch.abort": (arg) => { const f = fetches.get(Number(arg)); if (f) f("canceled") },
     "ui.navigate": (url) => { location.assign(url) },
+    "ui.eth.providers": (arg, reply) => {
+      let q = {}
+      try { q = arg ? JSON.parse(arg) : {} } catch (e) {}
+      ethAsk()
+      setTimeout(() => reply(JSON.stringify(ethList())), q.wait_ms >= 0 ? q.wait_ms : 50)
+    },
+    "ui.eth.request": (arg, reply) => {
+      let q
+      try { q = JSON.parse(arg) } catch (e) { reply(JSON.stringify({ error: { code: -32600, message: "bad request: " + e.message, data: null } })); return }
+      const p = ethProvider(q.id)
+      if (!p) { reply(JSON.stringify({ error: { code: 4900, message: "no wallet provider " + JSON.stringify(q.id), data: null } })); return }
+      const req = { method: q.method }
+      if (q.params != null) req.params = q.params
+      Promise.resolve()
+        .then(() => p.request(req))
+        .then((result) => ({ result: result === undefined ? null : result }), (e) => ({ error: ethError(e) }))
+        .then((res) => {
+          let s
+          try { s = JSON.stringify(res) } catch (e) { s = JSON.stringify({ error: { code: -32603, message: "the wallet's answer is not JSON: " + e.message, data: null } }) }
+          reply(s)
+        })
+    },
+    "ui.eth.subscribe": (arg, reply) => {
+      let q
+      try { q = JSON.parse(arg) } catch (e) { q = { id: arg } }
+      const p = ethProvider(q.id)
+      if (!p || typeof p.on !== "function") { reply(JSON.stringify({ error: { code: 4900, message: "no wallet provider " + JSON.stringify(q.id), data: null } })); return }
+      if (!eth.subscribed.has(p)) {
+        eth.subscribed.add(p)
+        const fwd = (name, conv) => p.on(name, (data) => {
+          let d = null
+          try { d = conv(data) } catch (e) {}
+          emit("ui.eth." + name, JSON.stringify({ id: q.id, data: d === undefined ? null : d }))
+        })
+        fwd("accountsChanged", (a) => Array.isArray(a) ? a : [])
+        fwd("chainChanged", (c) => String(c))
+        fwd("connect", (info) => ({ chain_id: String((info && info.chainId) || "") }))
+        fwd("disconnect", (e) => ethError(e || {}))
+      }
+      reply(JSON.stringify({ ok: true }))
+    },
+  }
+
+  // ---- wallets (EIP-1193 providers, found with EIP-6963) -------------------------------------
+  // Wallets announce themselves with "eip6963:announceProvider" (each with a uuid, name, icon and
+  // rdns) in answer to "eip6963:requestProvider"; older ones only set window.ethereum, listed as
+  // the provider "injected" when no announced one is the same object.
+  const eth = { list: [], byId: new Map(), subscribed: new Set() }
+  window.addEventListener("eip6963:announceProvider", (ev) => {
+    const d = ev && ev.detail
+    if (!d || !d.info || !d.provider || typeof d.provider.request !== "function") return
+    const id = String(d.info.uuid || "")
+    if (!id || id === "injected") return
+    const i = eth.list.findIndex((x) => x.id === id || x.provider === d.provider)
+    const w = { id, info: d.info, provider: d.provider }
+    if (i >= 0) { eth.byId.delete(eth.list[i].id); eth.list[i] = w } else eth.list.push(w)
+    eth.byId.set(id, d.provider)
+  })
+  function ethAsk() { try { window.dispatchEvent(new Event("eip6963:requestProvider")) } catch (e) {} }
+  ethAsk()
+  function ethProvider(id) {
+    if (id === "injected") return window.ethereum || null
+    return eth.byId.get(id) || null
+  }
+  function ethList() {
+    const out = eth.list.map((w) => ({ id: w.id, name: String(w.info.name || ""), icon: String(w.info.icon || ""), rdns: String(w.info.rdns || ""), is_metamask: !!w.provider.isMetaMask }))
+    const inj = window.ethereum
+    if (inj && typeof inj.request === "function" && !eth.list.some((w) => w.provider === inj)) {
+      out.push({ id: "injected", name: "Injected (window.ethereum)", icon: "", rdns: "", is_metamask: !!inj.isMetaMask })
+    }
+    return out
+  }
+  // an EIP-1193 error as {code, message, data} (MetaMask Mobile wraps 4902 in a -32603)
+  function ethError(e) {
+    let code = e && typeof e.code === "number" ? e.code : -32603
+    const orig = e && e.data && e.data.originalError
+    if (code === -32603 && orig && orig.code === 4902) code = 4902
+    let data = e && e.data !== undefined ? e.data : null
+    try { JSON.stringify(data) } catch (x) { data = null }
+    return { code, message: String((e && e.message) || e || "wallet error"), data }
   }
 
   function forget(n) {
@@ -325,7 +411,8 @@
           const id = num(), name = str(), arg = str()
           const fn = (window.__UI_FNS__ || {})[name] || builtins[name]
           if (!fn) { console.error("caju-ui: ui.call: no page function " + name + " (window.__UI_FNS__)"); break }
-          const reply = (v) => send("c" + id + "," + S(String(v)))
+          const g = gen       // a reply after a hot reload is not for the new program
+          const reply = (v) => { if (g === gen) send("c" + id + "," + S(String(v))) }
           try {
             const r = fn(arg, reply)
             if (r && typeof r.then === "function") r.then((v) => { if (v !== undefined) reply(v) }, (e) => console.error(e))
@@ -352,6 +439,7 @@
     queue = []
     seq = 0
     answered = 0
+    gen++
     worker = new Worker(cfg.worker || "__ui/worker.js", { type: "module" })
     worker.onmessage = (m) => {
       const d = m.data
