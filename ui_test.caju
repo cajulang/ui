@@ -270,6 +270,12 @@ describe("events", fn() {
     r.handle("c9,1:x")
     expect(got).to_equal([]str{"out", "exit"})
   })
+  it("navigate with the page's built-in function", fn() {
+    r, d := setup()
+    r.render(ui.h("button", []ui.Attr{ui.on("click", fn() { ui.navigate("/busca?q=caju") })}, nil))
+    click(r, d.root.children[0].id)
+    expect(d.calls).to_equal([]str{"1 ui.navigate /busca?q=caju"})
+  })
   it("report a panicking handler instead of crashing", fn() {
     r, d := setup()
     r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { panic("boom") })}, nil))

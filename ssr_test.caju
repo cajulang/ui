@@ -80,3 +80,61 @@ describe("hydration", fn() {
     expect(d.html()).to_equal("<p class=\"greet\">hi x41</p>")
   })
 })
+
+# a component that loads something once: on the server it keeps it with ssr_put, and in the
+# browser it finds it with ssr_get while hydrating
+let loads: int = 0
+fn Loader() -> *ui.Node {
+  v, ok := ui.ssr_get("price")
+  if !ok {
+    loads++
+    v = "42"
+    ui.ssr_put("price", v)
+  }
+  return ui.h("b", nil, []*ui.Node{ui.text(v)})
+}
+fn loader() -> *ui.Node { return ui.c0("Loader", Loader) }
+
+describe("ui.ssr_put and ui.ssr_get", fn() {
+  it("keep values during one server render and return them with the HTML", fn() {
+    loads = 0
+    r := ui.render_to_string(ui.h("div", nil, []*ui.Node{loader(), loader()}))
+    expect(loads).to_equal(1)
+    expect(r.values).to_equal("{\"price\":\"42\"}")
+    expect(ui.render_to_string(ui.text("x")).values).to_equal("")
+  })
+  it("are put in the page by ui.page, safe inside a script", fn() {
+    out := ui.page("<body><div id=\"app\"></div></body>", "#app", ui.c0("P", fn() -> *ui.Node {
+      ui.ssr_put("k", "</script>")
+      return ui.text("x")
+    }), "")
+    expect(strings.contains(out, "<script type=\"application/json\" id=\"__ui_ssr\">{\"k\":\"\\u003c/script>\"}</script>")).to_equal(true)
+    expect(strings.contains(ui.page("<body><div id=\"app\"></div></body>", "#app", ui.text("x"), ""), "__ui_ssr")).to_equal(false)
+  })
+  it("give the browser the server's values while hydrating, and nothing after", fn() {
+    srv := ui.render_to_string(loader())
+    d := fakedom.new_dom()
+    r := ui.new_renderer("#app", fn(b: str) { d.apply(b) })
+    loads = 0
+    r.handle("i0:0:" + str(len(srv.values)) + ":" + srv.values)
+    r.hydrate(loader())
+    expect(loads).to_equal(0)
+    expect(d.html()).to_equal("<b>42</b>")
+    _, ok := ui.ssr_get("price")
+    expect(ok).to_equal(false)
+  })
+  it("tell the server from the page", fn() {
+    seen := []bool{}
+    ui.render_to_string(ui.c0("W", fn() -> *ui.Node {
+      seen = append(seen, ui.on_server(), ui.in_page())
+      return ui.empty()
+    }))
+    d := fakedom.new_dom()
+    r := ui.new_renderer("#app", fn(b: str) { d.apply(b) })
+    r.render(ui.c0("W", fn() -> *ui.Node {
+      seen = append(seen, ui.on_server(), ui.in_page())
+      return ui.empty()
+    }))
+    expect(seen).to_equal([]bool{true, false, false, true})
+  })
+})

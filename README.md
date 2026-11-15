@@ -104,6 +104,7 @@ UI_DIST=dist ./server              # serves dist/ and renders every page
 | `ui.page(template, "#app", node, data)` | a whole page: `template` (`ssr.template()`, the build's `index.html`) with the HTML inside `#app`, the state, and `data` for the client |
 | `ui.hydrate(selector, node)` | like `ui.mount`, over the server's HTML |
 | `ui.data()` | in the browser: the `data` the server passed to `ui.page` |
+| `ui.ssr_put(key, value)`, `ui.ssr_get(key)` | values kept while rendering on the server (by a data-loading hook, say), which the page carries to the browser for hydration |
 | `ssr.serve(host, port, page)` | serves the build's files and, for other paths, `page(req)` (`""` is a 404); `PORT`, `UI_DIST`, `UI_TEMPLATE` override |
 | `ssr.template()`, `ssr.isolate(res)` | the page template; the headers every response needs (for your own `std/http` or `web` server) |
 | `gzip.compress(s)`, `gzip.compress_fast(s)`, `gzip.accepted(h)` | `import "github.com/cajulang/ui/gzip"`: DEFLATE/gzip in Caju for `Content-Encoding: gzip` responses (dynamic Huffman codes; `compress` is the smallest, for files compressed once, `compress_fast` about 25% faster for a response made on each request) |
@@ -156,6 +157,14 @@ its starting value, so what the user types stays (a plain `<form method="post">`
 | `ui.focus(el)`, `ui.cx(map[str]bool{...})` | focus an element; class names from conditions |
 | `ui.copy(text)` | copies text to the clipboard (from an event handler) |
 | `ui.call(name, arg, fn(reply: str) {...})` | calls `window.__UI_FNS__[name](arg, reply)` on the page, for browser APIs the worker lacks (storage, history, cookies, other workers); every `reply(text)` runs the callback |
+| `ui.navigate(url)` | goes to another page (`location.assign`) |
+| `ui.in_page()`, `ui.on_server()` | the program runs in the page (after `mount`/`hydrate`); a component is rendering on the server (`render_to_string`) |
+| `ui.ssr_put(key, value)`, `ui.ssr_get(key)` | values that server rendering hands to hydration: kept while rendering on the server, put in the page by `ui.page`, and given back in the browser while it hydrates (for libraries such as [fetch](https://github.com/cajulang/fetch), so what the server loaded is not loaded again) |
+
+The page has built-in functions for `ui.call`, so apps need no JavaScript of their own for them:
+`ui.fetch` (the browser's `fetch` with an `AbortController` for cancel and timeout; HTTP requests
+from components go through it with [github.com/cajulang/fetch](https://github.com/cajulang/fetch)),
+`ui.fetch.abort` and `ui.navigate`.
 
 State that survives a hot reload: `use_int`, `use_str`, `use_bool`, `use_num`, and `use_state`
 holding a `str`, `int`, `num` or `bool`.

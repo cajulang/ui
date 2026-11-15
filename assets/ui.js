@@ -90,6 +90,41 @@
     t.remove()
   }
 
+  // ---- built-in page functions (ui.call) -----------------------------------------------------
+  // ui.fetch: the browser's fetch for the program (github.com/cajulang/fetch). The argument is
+  // JSON {id, method, url, headers, body, timeout_ms}; the reply is JSON {status, status_text,
+  // headers, body, url} or, when there is no response, {error: "network"|"timeout"|"canceled",
+  // message}. ui.fetch.abort cancels the request with that id.
+  const fetches = new Map()
+  const builtins = {
+    "ui.fetch": (arg, reply) => {
+      let q
+      try { q = JSON.parse(arg) } catch (e) { reply(JSON.stringify({ error: "network", message: "bad request: " + e.message })); return }
+      const ac = new AbortController()
+      let why = "", timer = 0
+      const abort = (w) => { if (!why) { why = w; ac.abort() } }
+      fetches.set(q.id, abort)
+      if (q.timeout_ms > 0) timer = setTimeout(() => abort("timeout"), q.timeout_ms)
+      const method = (q.method || "GET").toUpperCase()
+      const init = { method, headers: q.headers || {}, signal: ac.signal, credentials: "same-origin" }
+      if (q.body && method !== "GET" && method !== "HEAD") init.body = q.body
+      fetch(q.url, init)
+        .then((r) => r.text().then((body) => {
+          const headers = {}
+          r.headers.forEach((v, k) => { headers[k] = v })
+          return { status: r.status, status_text: r.statusText, headers, body, url: r.url }
+        }))
+        .catch((e) => ({ error: why || "network", message: why ? "" : String((e && e.message) || e) }))
+        .then((res) => {
+          clearTimeout(timer)
+          fetches.delete(q.id)
+          reply(JSON.stringify(res))
+        })
+    },
+    "ui.fetch.abort": (arg) => { const f = fetches.get(Number(arg)); if (f) f("canceled") },
+    "ui.navigate": (url) => { location.assign(url) },
+  }
+
   function forget(n) {
     if (n.__uid) nodes.delete(n.__uid)
     for (let c = n.firstChild; c; c = c.nextSibling) forget(c)
@@ -288,7 +323,7 @@
         case 87: { copyText(str()); break }                                               // W
         case 74: {                                                                         // J
           const id = num(), name = str(), arg = str()
-          const fn = (window.__UI_FNS__ || {})[name]
+          const fn = (window.__UI_FNS__ || {})[name] || builtins[name]
           if (!fn) { console.error("caju-ui: ui.call: no page function " + name + " (window.__UI_FNS__)"); break }
           const reply = (v) => send("c" + id + "," + S(String(v)))
           try {
@@ -308,6 +343,7 @@
   // what the server put in the page (ui.page): the components' state and the data for ui.data()
   const json = (id) => { const el = document.getElementById(id); return el ? el.textContent : "" }
   const pageData = json("__ui_data")
+  const ssrValues = json("__ui_ssr")
 
   function start(url, state) {
     const sab = new SharedArrayBuffer(8 + BOX)
@@ -336,10 +372,13 @@
     }
     worker.onerror = (e) => overlay("worker: " + (e.message || e))
     worker.postMessage({ t: "start", url: new URL(url, location.href).href, sab })
-    send("i" + S(state || "") + S(pageData))
+    // a hot reload loads fresh data instead of the server's (ssrValues are for the first start)
+    send("i" + S(state || "") + S(pageData) + S(hotStart ? "" : ssrValues))
   }
 
   function stop() {
+    for (const abort of fetches.values()) abort("canceled")
+    fetches.clear()
     if (worker) worker.terminate()
     worker = null
     ctl = null

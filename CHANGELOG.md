@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-15
+
+### Added
+
+- Built-in page functions for `ui.call`: `ui.fetch` runs the browser's `fetch` for the program
+  (with an `AbortController` for cancel and timeout) and `ui.fetch.abort` cancels it; they are what
+  [github.com/cajulang/fetch](https://github.com/cajulang/fetch) uses in the browser, so apps no
+  longer write JavaScript to call their API. A hot reload cancels the requests in flight.
+- `ui.navigate(url)` (and the `ui.navigate` page function): goes to another page.
+- `ui.ssr_put(key, value)` and `ui.ssr_get(key)`: values a server render keeps (`Rendered.values`),
+  which `ui.page` puts in the page (`<script id="__ui_ssr">`) and the browser gets back while it
+  hydrates, so data loaded on the server is not loaded again.
+- `ui.in_page()` and `ui.on_server()`: whether the program runs in the page or a component is
+  rendering on the server.
+
+### Changed
+
+- The page's init message carries a third field, the server's values (`i state data values`).
+
 ## [0.2.0] - 2026-11-14
 
 ### Changed
@@ -55,6 +74,7 @@ All notable changes to this project are documented here. The format follows
 - `caju-ui build` copies `public/` into the build (it copied nothing when the output existed).
 - `caju-ui build --ssr` and `dev --ssr` replace a running server binary ("text file busy").
 
-[Unreleased]: https://github.com/cajulang/ui/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cajulang/ui/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cajulang/ui/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cajulang/ui/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cajulang/ui/releases/tag/v0.1.0

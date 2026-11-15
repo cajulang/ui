@@ -37,11 +37,13 @@
 #                     P id w h px  put RGBA pixels into a <canvas>
 #                     F id         focus a node
 #                     W text       copy text to the clipboard
-#                     J id fn arg  call the page's function fn (window.__UI_FNS__[fn](arg, reply))
+#                     J id fn arg  call the page's function fn (window.__UI_FNS__[fn](arg, reply),
+#                                  or a built-in one: ui.fetch, ui.fetch.abort, ui.navigate)
 #                     Z json       the state snapshot asked for by a hot reload
 #                     ! text       an error to show (a panic in a component or handler)
-#   page -> program   i state data init: the components' state to restore (after a hot reload or
-#                                  from the server, "" for none) and the page's data (ui.data)
+#   page -> program   i state data values   init: the components' state to restore (after a hot
+#                                  reload or from the server, "" for none), the page's data (ui.data)
+#                                  and the values server rendering kept (ssr_put; JSON, may be "")
 #                     e seq id type value checked key x y   a DOM event
 #                     t id         a timer fired
 #                     s            take a state snapshot (a hot reload is coming)
@@ -294,6 +296,7 @@ export struct Renderer {
   calls: map[int]fn(str)        # the callbacks of ui.call, by call id
   next_call: int
   server: bool                  # rendering to a string: no effects, no timers
+  values: map[str]str           # ssr_put / ssr_get: what server rendering hands to hydration
 }
 
 let R: *Renderer = nil
@@ -1121,6 +1124,14 @@ export fn (r: *Renderer) handle(data: str) {
         let m: map[str][]any
         if json.unmarshal(st, &m) == nil { r.restore = m }
       }
+      # the values the server put in the page with ssr_put (older pages send only two fields)
+      if rd.i < len(data) && int(data[rd.i]) >= '0' && int(data[rd.i]) <= '9' {
+        vs := rd.str_()
+        if vs != "" {
+          let vm: map[str]str
+          if json.unmarshal(vs, &vm) == nil { r.values = vm }
+        }
+      }
     } else {
       return
     }
@@ -1429,7 +1440,9 @@ export fn copy(text: str) {
 
 # calls a function of the page: window.__UI_FNS__[name](arg, reply), for what only the page can do
 # (the browser's APIs: storage, history, cookies, other workers...). Each reply(text) the page
-# makes runs cb with it (cb nil: no reply wanted). Does nothing on the server
+# makes runs cb with it (cb nil: no reply wanted). Does nothing on the server. The page also has
+# built-in functions: "ui.fetch" (the browser's fetch, used by github.com/cajulang/fetch),
+# "ui.fetch.abort" and "ui.navigate" (see navigate)
 export fn call(name: str, arg: str, cb: fn(str)) {
   if R.server { return }
   if R.calls == nil { R.calls = map[int]fn(str){} }
@@ -1452,6 +1465,35 @@ fn (r: *Renderer) reply(id: int, text: str) {
     if x != nil { r.fail("ui.call reply", x) }
   }()
   cb(text)
+}
+
+# goes to another page (location.assign(url)): a full navigation, as a link would do. Does nothing
+# on the server
+export fn navigate(url: str) { call("ui.navigate", url, nil) }
+
+# true while the program runs in the page (ui.mount / ui.hydrate, or a renderer with a sink): the
+# browser's APIs are reachable through ui.call
+export fn in_page() -> bool { return R != nil && !R.server && R.sink != nil }
+
+# true while render_to_string (or ui.page) renders on the server
+export fn on_server() -> bool { return R != nil && R.server }
+
+# keeps a value (text, usually JSON) under key while rendering on the server; ui.page puts these
+# values in the page, and ssr_get gives them back while the client hydrates. Libraries use it so
+# that what a component loaded on the server is not loaded again in the browser (fetch.use_request)
+export fn ssr_put(key: str, value: str) {
+  if R == nil || !R.server { return }
+  if R.values == nil { R.values = map[str]str{} }
+  R.values[key] = value
+}
+
+# the value ssr_put kept under key: on the server, during the same render; in the browser, only
+# while hydrating (the first render over the server's HTML), so later renders load fresh data
+export fn ssr_get(key: str) -> (str, bool) {
+  if R == nil || R.values == nil { return "", false }
+  if !R.server && !R.hydrating { return "", false }
+  v, ok := R.values[key]
+  return v, ok
 }
 
 # moves the keyboard focus to the element el refers to
@@ -1575,6 +1617,7 @@ fn run(selector: str, root: *Node, hydrate: bool) {
 export struct Rendered {
   html: str
   state: str
+  values: str         # what the components kept with ssr_put, as a JSON object ("" for none)
 }
 
 struct Html {
@@ -1598,6 +1641,10 @@ export fn render_to_string(node: *Node) -> *Rendered {
   w := &Html{b: &strings.Builder{}}
   r.html(node, w)
   out := &Rendered{html: w.b.string(), state: r.snapshot()}
+  if r.values != nil && len(r.values) > 0 {
+    vs, err := json.marshal(r.values)
+    if err == nil { out.values = vs }
+  }
   R = prev
   return out
 }
@@ -1688,6 +1735,7 @@ export fn page(template: str, selector: str, node: *Node, data: str) -> str {
     out = rr.html + out
   }
   scripts := "<script type=\"application/json\" id=\"__ui_state\">" + script_safe(rr.state) + "</script>\n<script type=\"application/json\" id=\"__ui_data\">" + script_safe(data) + "</script>\n"
+  if rr.values != "" { scripts = scripts + "<script type=\"application/json\" id=\"__ui_ssr\">" + script_safe(rr.values) + "</script>\n" }
   k := strings.index(out, "<script>window.__UI__")
   if k < 0 { k = strings.last_index(out, "</body>") }
   if k < 0 { return out + scripts }
