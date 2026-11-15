@@ -39,7 +39,8 @@
 #                     W text       copy text to the clipboard
 #                     J id fn arg  call the page's function fn (window.__UI_FNS__[fn](arg, reply),
 #                                  or a built-in one: ui.fetch, ui.fetch.abort, ui.navigate,
-#                                  ui.eth.providers, ui.eth.request, ui.eth.subscribe)
+#                                  ui.eth.providers, ui.eth.request, ui.eth.subscribe,
+#                                  ui.storage.get/set/remove, ui.env, ui.document, ui.meta)
 #                     Z json       the state snapshot asked for by a hot reload
 #                     ! text       an error to show (a panic in a component or handler)
 #   page -> program   i state data values   init: the components' state to restore (after a hot
@@ -1448,8 +1449,10 @@ export fn copy(text: str) {
 # (the browser's APIs: storage, history, cookies, other workers...). Each reply(text) the page
 # makes runs cb with it (cb nil: no reply wanted). Does nothing on the server. The page also has
 # built-in functions: "ui.fetch" (the browser's fetch, used by github.com/cajulang/fetch),
-# "ui.fetch.abort", "ui.navigate" (see navigate) and the EIP-1193 wallet bridge "ui.eth.providers",
-# "ui.eth.request" and "ui.eth.subscribe" (used by github.com/cajulang/web3/wallet)
+# "ui.fetch.abort", "ui.navigate" (see navigate), the EIP-1193 wallet bridge "ui.eth.providers",
+# "ui.eth.request" and "ui.eth.subscribe" (used by github.com/cajulang/web3/wallet), and
+# "ui.storage.get/set/remove", "ui.env", "ui.document" and "ui.meta" (see storage_get, env,
+# set_document, set_meta)
 export fn call(name: str, arg: str, cb: fn(str)) {
   if R.server { return }
   if R.calls == nil { R.calls = map[int]fn(str){} }
@@ -1526,6 +1529,103 @@ fn (r: *Renderer) run_page_listener(name: str, l: *PageListener, data: str) {
 # goes to another page (location.assign(url)): a full navigation, as a link would do. Does nothing
 # on the server
 export fn navigate(url: str) { call("ui.navigate", url, nil) }
+
+# ---------------------------------------------------------------------------------------------
+# The browser: storage, environment, document (built-in page functions)
+
+# the reply of the page function ui.storage.get
+struct StorageReply {
+  found: bool
+  value: str
+}
+
+fn page_reachable() -> bool { return R != nil && !R.server }
+
+# a JSON string ("..."), for the arguments of the page functions
+fn jstr(s: str) -> str {
+  out, err := json.marshal(s)
+  if err != nil { return "\"\"" }
+  return out
+}
+
+# reads key from the browser's storage (localStorage) and runs cb(value, found) with it. The keys
+# are the page's own: they are shared with everything else on the same origin, so prefix them with
+# the app's name ("myapp:theme"). Where storage is unavailable (private mode, blocked storage) and
+# on the server, the key is not found: cb("", false) (on the server, right away). Call it from an
+# effect or an event handler, not while rendering
+export fn storage_get(key: str, cb: fn(str, bool)) {
+  if !page_reachable() {
+    if cb != nil { cb("", false) }
+    return
+  }
+  call("ui.storage.get", key, fn(reply: str) {
+    let sr: StorageReply
+    if json.unmarshal(reply, &sr) != nil {
+      sr.found = false
+      sr.value = ""
+    }
+    if cb != nil { cb(sr.value, sr.found) }
+  })
+}
+
+# keeps value under key in the browser's storage (localStorage); does nothing where storage is
+# unavailable and on the server
+export fn storage_set(key: str, value: str) {
+  if !page_reachable() { return }
+  call("ui.storage.set", "{\"key\":" + jstr(key) + ",\"value\":" + jstr(value) + "}", nil)
+}
+
+# removes key from the browser's storage (localStorage); does nothing where storage is unavailable
+# and on the server
+export fn storage_remove(key: str) {
+  if !page_reachable() { return }
+  call("ui.storage.remove", key, nil)
+}
+
+# the browser's environment, as ui.env gives it
+export struct Env {
+  languages: []str    # navigator.languages, preferred first ("pt-BR", "en")
+  color_scheme: str   # "light" or "dark" (prefers-color-scheme)
+  url: str            # location.href
+  user_agent: str     # navigator.userAgent
+}
+
+# asks the page for its environment and runs cb with it. Does nothing on the server (cb is not
+# called: the server does not know the browser). When the user's color scheme changes, the page
+# sends the page event "ui.env.color_scheme" ("light" or "dark", see on_color_scheme); when their
+# languages change, "ui.env.languages" (a JSON list)
+export fn env(cb: fn(*Env)) {
+  if !page_reachable() || cb == nil { return }
+  call("ui.env", "", fn(reply: str) {
+    e := &Env{languages: []str{}, color_scheme: "light"}
+    json.unmarshal(reply, e)
+    if e.languages == nil { e.languages = []str{} }
+    if e.color_scheme != "dark" { e.color_scheme = "light" }
+    cb(e)
+  })
+}
+
+# runs f("light" or "dark") each time the user's preferred color scheme changes (the page event
+# "ui.env.color_scheme"); returns a function that stops listening. ui.env gives the current one
+export fn on_color_scheme(f: fn(str)) -> fn() {
+  return on_page_event("ui.env.color_scheme", fn(data: str) {
+    if data == "dark" { f("dark") } else { f("light") }
+  })
+}
+
+# sets <html lang> and the page's title (document.title); "" leaves that one as it is. Does
+# nothing on the server (put them in the page's template there)
+export fn set_document(lang: str, title: str) {
+  if !page_reachable() { return }
+  call("ui.document", "{\"lang\":" + jstr(lang) + ",\"title\":" + jstr(title) + "}", nil)
+}
+
+# sets the content of <meta name="name"> (adding the element to <head> if the page has none).
+# Does nothing on the server
+export fn set_meta(name: str, content: str) {
+  if !page_reachable() { return }
+  call("ui.meta", "{\"name\":" + jstr(name) + ",\"content\":" + jstr(content) + "}", nil)
+}
 
 # true while the program runs in the page (ui.mount / ui.hydrate, or a renderer with a sink): the
 # browser's APIs are reachable through ui.call
@@ -1792,7 +1892,10 @@ export fn page(template: str, selector: str, node: *Node, data: str) -> str {
   }
   scripts := "<script type=\"application/json\" id=\"__ui_state\">" + script_safe(rr.state) + "</script>\n<script type=\"application/json\" id=\"__ui_data\">" + script_safe(data) + "</script>\n"
   if rr.values != "" { scripts = scripts + "<script type=\"application/json\" id=\"__ui_ssr\">" + script_safe(rr.values) + "</script>\n" }
-  k := strings.index(out, "<script>window.__UI__")
+  # before the runtime's script (caju-ui 0.5: <script id="__ui_runtime" ...>; before: an inline
+  # <script>window.__UI__ = ...</script>), or at the end of the body
+  k := strings.index(out, "<script id=\"__ui_runtime\"")
+  if k < 0 { k = strings.index(out, "<script>window.__UI__") }
   if k < 0 { k = strings.last_index(out, "</body>") }
   if k < 0 { return out + scripts }
   return out[0:k] + scripts + out[k:]

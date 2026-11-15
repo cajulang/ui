@@ -3,7 +3,23 @@
 // code changes (keeping the components' state). See ui.caju for the protocol.
 (() => {
   "use strict"
-  const cfg = window.__UI__ || {}
+  // the settings: the data-* attributes of this script's tag (caju-ui build and dev write them,
+  // so the page needs no inline script and works under a strict Content-Security-Policy), and
+  // window.__UI__ for pages that set it themselves (it wins)
+  const cfg = Object.assign(settings(), window.__UI__ || {})
+  function settings() {
+    const out = {}
+    let el = null
+    try { el = document.currentScript || document.getElementById("__ui_runtime") } catch (e) {}
+    const d = el && el.dataset
+    if (!d) return out
+    if (d.wasm) out.wasm = d.wasm
+    if (d.worker) out.worker = d.worker
+    if (d.dev) out.dev = d.dev === "1" || d.dev === "true"
+    if (d.v) out.v = Number(d.v)
+    if (d.sid) out.sid = d.sid
+    return out
+  }
   const SVG = "http://www.w3.org/2000/svg"
   const BOX = 4 << 20
   const enc = new TextEncoder()
@@ -129,6 +145,47 @@
     },
     "ui.fetch.abort": (arg) => { const f = fetches.get(Number(arg)); if (f) f("canceled") },
     "ui.navigate": (url) => { location.assign(url) },
+    // storage (localStorage, raw keys): a page where it is unavailable or throws (private mode,
+    // blocked cookies, quota) reads as "not found" and writes nothing
+    "ui.storage.get": (key, reply) => {
+      let v = null
+      try { v = storage().getItem(String(key)) } catch (e) { v = null }
+      reply(v == null ? "{\"found\":false,\"value\":\"\"}" : JSON.stringify({ found: true, value: String(v) }))
+    },
+    "ui.storage.set": (arg) => {
+      try {
+        const q = JSON.parse(arg)
+        storage().setItem(String(q.key), String(q.value == null ? "" : q.value))
+      } catch (e) {}
+    },
+    "ui.storage.remove": (key) => { try { storage().removeItem(String(key)) } catch (e) {} },
+    // the browser's environment: {languages, color_scheme, url, user_agent}
+    "ui.env": (_arg, reply) => { reply(JSON.stringify(env())) },
+    // <html lang> and document.title ("" leaves each as it is)
+    "ui.document": (arg) => {
+      let q = {}
+      try { q = JSON.parse(arg) } catch (e) { return }
+      try {
+        if (q.lang) document.documentElement.lang = String(q.lang)
+        if (q.title) document.title = String(q.title)
+      } catch (e) {}
+    },
+    // <meta name content>: sets the first <meta name=...>, or adds one to <head>
+    "ui.meta": (arg) => {
+      let q = {}
+      try { q = JSON.parse(arg) } catch (e) { return }
+      if (!q.name) return
+      try {
+        let m = null
+        for (const x of document.getElementsByTagName("meta")) if (x.getAttribute("name") === q.name) { m = x; break }
+        if (!m) {
+          m = document.createElement("meta")
+          m.setAttribute("name", String(q.name))
+          ;(document.head || document.documentElement).appendChild(m)
+        }
+        m.setAttribute("content", String(q.content == null ? "" : q.content))
+      } catch (e) {}
+    },
     "ui.eth.providers": (arg, reply) => {
       let q = {}
       try { q = arg ? JSON.parse(arg) : {} } catch (e) {}
@@ -171,6 +228,34 @@
       reply(JSON.stringify({ ok: true }))
     },
   }
+
+  // ---- storage and the environment -----------------------------------------------------------
+  // window.localStorage itself throws in some browsers when storage is blocked
+  function storage() { return window.localStorage }
+  function colorScheme() {
+    try { return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" } catch (e) { return "light" }
+  }
+  function languages() {
+    const nav = window.navigator || (typeof navigator !== "undefined" ? navigator : {}) || {}
+    let l = []
+    try { l = Array.from(nav.languages || []).map(String) } catch (e) {}
+    if (l.length === 0 && nav.language) l = [String(nav.language)]
+    return l
+  }
+  function env() {
+    const nav = window.navigator || (typeof navigator !== "undefined" ? navigator : {}) || {}
+    let url = ""
+    try { url = String(location.href) } catch (e) {}
+    return { languages: languages(), color_scheme: colorScheme(), url, user_agent: String(nav.userAgent || "") }
+  }
+  // the page events ui.env.color_scheme ("light" or "dark") and ui.env.languages (JSON list)
+  try {
+    const mq = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)")
+    const onScheme = (e) => emit("ui.env.color_scheme", e && typeof e.matches === "boolean" ? (e.matches ? "dark" : "light") : colorScheme())
+    if (mq && mq.addEventListener) mq.addEventListener("change", onScheme)
+    else if (mq && mq.addListener) mq.addListener(onScheme)
+  } catch (e) {}
+  window.addEventListener("languagechange", () => emit("ui.env.languages", JSON.stringify(languages())))
 
   // ---- wallets (EIP-1193 providers, found with EIP-6963) -------------------------------------
   // Wallets announce themselves with "eip6963:announceProvider" (each with a uuid, name, icon and

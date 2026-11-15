@@ -324,6 +324,90 @@ describe("events", fn() {
     r.handle(fakedom.reply_msg(id, "{\"result\":\"0x1\"}"))
     expect(got).to_equal("{\"result\":\"0x1\"}")
   })
+  it("read, write and remove the browser's storage with the built-in page functions", fn() {
+    r, d := setup()
+    r.render(el("div", nil))
+    got := []str{}
+    ui.storage_get("app:theme", fn(v: str, found: bool) { got = append(got, v + "/" + str(found)) })
+    ui.storage_get("app:none", fn(v: str, found: bool) { got = append(got, v + "/" + str(found)) })
+    ui.storage_get("app:bad", fn(v: str, found: bool) { got = append(got, v + "/" + str(found)) })
+    ui.storage_set("app:theme", "da\"rk")
+    ui.storage_remove("app:old")
+    r.work()
+    id0, n0, a0 := d.call_at(0)
+    expect(n0 + " " + a0).to_equal("ui.storage.get app:theme")
+    id1, _, _ := d.call_at(1)
+    id2, _, _ := d.call_at(2)
+    _, n3, a3 := d.call_at(3)
+    expect(n3 + " " + a3).to_equal("ui.storage.set {\"key\":\"app:theme\",\"value\":\"da\\\"rk\"}")
+    _, n4, a4 := d.call_at(4)
+    expect(n4 + " " + a4).to_equal("ui.storage.remove app:old")
+    expect(len(d.calls)).to_equal(5)
+    r.handle(fakedom.reply_msg(id0, "{\"found\":true,\"value\":\"dark\"}"))
+    r.handle(fakedom.reply_msg(id1, "{\"found\":false,\"value\":\"\"}"))
+    r.handle(fakedom.reply_msg(id2, "not json"))
+    expect(got).to_equal([]str{"dark/true", "/false", "/false"})
+  })
+  it("ask the page for its environment, and hear color scheme changes", fn() {
+    r, d := setup()
+    r.render(el("div", nil))
+    let got: *ui.Env = nil
+    ui.env(fn(e: *ui.Env) { got = e })
+    r.work()
+    id, name, _ := d.call_at(0)
+    expect(name).to_equal("ui.env")
+    r.handle(fakedom.reply_msg(id, "{\"languages\":[\"pt-BR\",\"en\"],\"color_scheme\":\"dark\",\"url\":\"https://x.dev/a\",\"user_agent\":\"UA\"}"))
+    expect(got.languages).to_equal([]str{"pt-BR", "en"})
+    expect(got.color_scheme).to_equal("dark")
+    expect(got.url).to_equal("https://x.dev/a")
+    expect(got.user_agent).to_equal("UA")
+    ui.env(fn(e: *ui.Env) { got = e })
+    r.work()
+    id2, _, _ := d.call_at(1)
+    r.handle(fakedom.reply_msg(id2, "{}"))
+    expect(len(got.languages)).to_equal(0)
+    expect(got.color_scheme).to_equal("light")
+    schemes := []str{}
+    off := ui.on_color_scheme(fn(s: str) { schemes = append(schemes, s) })
+    raw := []str{}
+    off2 := ui.on_page_event("ui.env.color_scheme", fn(s: str) { raw = append(raw, s) })
+    r.handle(fakedom.event_msg("ui.env.color_scheme", "dark") + fakedom.event_msg("ui.env.color_scheme", "light"))
+    off()
+    r.handle(fakedom.event_msg("ui.env.color_scheme", "dark"))
+    off2()
+    expect(schemes).to_equal([]str{"dark", "light"})
+    expect(raw).to_equal([]str{"dark", "light", "dark"})
+  })
+  it("set the document's language, title and meta tags", fn() {
+    r, d := setup()
+    r.render(el("div", nil))
+    ui.set_document("pt-BR", "Carteira")
+    ui.set_document("", "Só o título")
+    ui.set_meta("description", "a \"wallet\"")
+    r.work()
+    expect(d.calls).to_equal([]str{
+      "1 ui.document {\"lang\":\"pt-BR\",\"title\":\"Carteira\"}",
+      "2 ui.document {\"lang\":\"\",\"title\":\"Só o título\"}",
+      "3 ui.meta {\"name\":\"description\",\"content\":\"a \\\"wallet\\\"\"}",
+    })
+  })
+  it("storage, env and document do nothing on the server (storage is not found)", fn() {
+    found := []str{}
+    envs := 0
+    Comp := fn() -> *ui.Node {
+      ui.storage_get("k", fn(v: str, ok: bool) { found = append(found, v + "/" + str(ok)) })
+      ui.storage_set("k", "v")
+      ui.storage_remove("k")
+      ui.env(fn(e: *ui.Env) { envs++ })
+      ui.set_document("en", "t")
+      ui.set_meta("a", "b")
+      return ui.text("ok")
+    }
+    out := ui.render_to_string(ui.c0("Comp", Comp))
+    expect(out.html).to_equal("ok")
+    expect(found).to_equal([]str{"/false"})
+    expect(envs).to_equal(0)
+  })
   it("report a panicking handler instead of crashing", fn() {
     r, d := setup()
     r.render(ui.h("a", []ui.Attr{ui.on("click", fn() { panic("boom") })}, nil))
