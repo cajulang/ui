@@ -1,0 +1,135 @@
+import { describe, it, expect } from "std/testing"
+import "std/os"
+import "std/fs"
+import "std/strings"
+import "std/crypto"
+import filepath "std/path"
+
+# caju-ui build, for real: compiles the command, builds testdata/examples/hello and checks the
+# output (no inline script, content-hashed names, the hosts' header files)
+
+const APP = "testdata/examples/hello"
+
+let bin: str = ""
+
+fn root() -> str { return os.getwd() }
+
+fn caju() -> str {
+  b := os.getenv("CAJU")
+  if b == "" { return "caju" }
+  return b
+}
+
+fn cli() -> str {
+  if bin != "" { return bin }
+  fs.mkdir_all(filepath.join(root(), "build"), 493)
+  b := filepath.join(root(), "build/caju-ui-test")
+  p, err := os.run([]str{caju(), "build", "-o", b, "cmd/caju-ui.caju"}, nil, true)
+  if err != nil || p.code != 0 { panic("could not build caju-ui: " + p.output) }
+  bin = b
+  return b
+}
+
+# runs caju-ui build in the test app with these flags into a fresh (or kept) output directory
+fn build(name: str, flags: str, fresh: bool) -> str {
+  out := filepath.join(root(), "build/test-" + name)
+  if fresh { fs.remove_all(out) }
+  script := "cd " + filepath.join(root(), APP) + " && " + cli() + " build -o " + out + " " + flags
+  p, err := os.run([]str{"sh", "-c", script}, nil, true)
+  if err != nil || p.code != 0 { panic("caju-ui build failed: " + p.output) }
+  return out
+}
+
+fn read(p: str) -> str {
+  s, err := fs.read_file(p)
+  if err != nil { return "" }
+  return s
+}
+
+# the value of the attribute name in the first tag that has it
+fn attr(html: str, name: str) -> str {
+  i := strings.index(html, " " + name + "=\"")
+  if i < 0 { return "" }
+  rest := html[i + len(name) + 3:]
+  return rest[0:strings.index(rest, "\"")]
+}
+
+# every <script ...> tag of the page has a src or is JSON data (nothing a CSP would block)
+fn inline_scripts(html: str) -> int {
+  n := 0
+  rest := html
+  while true {
+    i := strings.index(rest, "<script")
+    if i < 0 { return n }
+    rest = rest[i + 7:]
+    tag := rest[0:strings.index(rest, ">")]
+    if !strings.contains(tag, " src=\"") && !strings.contains(tag, "type=\"application/json\"") { n++ }
+  }
+  return n
+}
+
+# name.<10 hex digits of the SHA-256 of its content>.ext
+fn hashed_ok(dir: str, url: str, prefix: str, ext: str) -> bool {
+  name := filepath.base(url)
+  if !strings.has_prefix(name, prefix + ".") || !strings.has_suffix(name, ext) { return false }
+  h := name[len(prefix) + 1:len(name) - len(ext)]
+  data, err := fs.read_file(filepath.join(dir, "__ui/" + name))
+  if err != nil { return false }
+  return len(h) == 10 && h == crypto.sha256_hex(data)[0:10]
+}
+
+describe("caju-ui build", fn() {
+  it("writes a page with no inline script that loads content-hashed files", fn() {
+    out := build("hashed", "", true)
+    html := read(filepath.join(out, "index.html"))
+    expect(inline_scripts(html)).to_equal(0)
+    expect(strings.contains(html, "window.__UI__")).to_equal(false)
+    expect(strings.contains(html, "<script id=\"__ui_runtime\"")).to_equal(true)
+    expect(hashed_ok(out, attr(html, "src"), "ui", ".js")).to_equal(true)
+    expect(hashed_ok(out, attr(html, "data-wasm"), "app", ".wasm")).to_equal(true)
+    expect(hashed_ok(out, attr(html, "data-worker"), "worker", ".js")).to_equal(true)
+    expect(strings.has_prefix(attr(html, "data-wasm"), "/__ui/app.")).to_equal(true)
+    # the worker imports the host by its hashed name, and that file is there
+    worker := read(filepath.join(out, "__ui/" + filepath.base(attr(html, "data-worker"))))
+    i := strings.index(worker, "from \"./caju-host.")
+    expect(i > 0).to_equal(true)
+    host := worker[i + 8:]
+    host = host[0:strings.index(host, "\"")]
+    expect(hashed_ok(out, host, "caju-host", ".mjs")).to_equal(true)
+    names, _ := fs.list_dir(filepath.join(out, "__ui"))
+    expect(len(names)).to_equal(4)
+    expect(fs.exists(filepath.join(out, "__ui/app.wasm"))).to_equal(false)
+    expect(fs.exists(filepath.join(out, "style.css"))).to_equal(true)
+    # the hosts' headers: isolation, and the hashed runtime cached for good
+    headers := read(filepath.join(out, "_headers"))
+    expect(strings.contains(headers, "Cross-Origin-Embedder-Policy: require-corp")).to_equal(true)
+    expect(strings.contains(headers, "/__ui/*\n  Cache-Control: public, max-age=31536000, immutable")).to_equal(true)
+    expect(strings.contains(read(filepath.join(out, "vercel.json")), "\"source\": \"/__ui/(.*)\"")).to_equal(true)
+  })
+  it("replaces the runtime of an earlier build and its own header files, but keeps the app's", fn() {
+    out := build("rebuild", "", true)
+    fs.write_file(filepath.join(out, "__ui/app.0000000000.wasm"), "old", 420)
+    fs.write_file(filepath.join(out, "vercel.json"), "{\"mine\": true}\n", 420)
+    build("rebuild", "--no-hash", false)
+    names, _ := fs.list_dir(filepath.join(out, "__ui"))
+    expect(len(names)).to_equal(4)
+    expect(fs.exists(filepath.join(out, "__ui/app.wasm"))).to_equal(true)
+    expect(fs.exists(filepath.join(out, "__ui/app.0000000000.wasm"))).to_equal(false)
+    html := read(filepath.join(out, "index.html"))
+    expect(attr(html, "data-wasm")).to_equal("/__ui/app.wasm")
+    expect(attr(html, "src")).to_equal("/__ui/ui.js")
+    expect(strings.contains(read(filepath.join(out, "__ui/worker.js")), "from \"./caju-host.mjs\"")).to_equal(true)
+    expect(read(filepath.join(out, "vercel.json"))).to_equal("{\"mine\": true}\n")
+    # caju-ui's own _headers is rewritten (without hashes: no immutable cache)
+    expect(strings.contains(read(filepath.join(out, "_headers")), "immutable")).to_equal(false)
+    expect(strings.contains(read(filepath.join(out, "_headers")), "require-corp")).to_equal(true)
+  })
+  it("writes no header files with --no-headers, and serves the runtime under --base", fn() {
+    out := build("base", "--no-headers --base /app", true)
+    expect(fs.exists(filepath.join(out, "_headers"))).to_equal(false)
+    expect(fs.exists(filepath.join(out, "vercel.json"))).to_equal(false)
+    html := read(filepath.join(out, "index.html"))
+    expect(strings.has_prefix(attr(html, "data-wasm"), "/app/__ui/app.")).to_equal(true)
+    expect(strings.has_prefix(attr(html, "src"), "/app/__ui/ui.")).to_equal(true)
+  })
+})

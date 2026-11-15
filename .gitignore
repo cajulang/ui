@@ -10,3 +10,4 @@ bench/results.json
 bench/caju/app.caju
 bench/caju/main.caju
 examples/ssr/server
+testdata/examples/**/*.caju

@@ -61,6 +61,26 @@ export fn isolate(res: *http.Response) {
   res.set_header("Cross-Origin-Resource-Policy", "same-origin")
 }
 
+fn is_hex(s: str) -> bool {
+  for i := 0; i < len(s); i++ {
+    c := int(s[i])
+    if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) { return false }
+  }
+  return true
+}
+
+# the Cache-Control for a file of the build: the runtime's files with a content hash in their
+# names (caju-ui build: /__ui/app.<hash>.wasm, worker.<hash>.js...) never change, so they are
+# cached for a year; everything else is revalidated
+export fn cache_control(path: str) -> str {
+  if strings.contains(path, "/__ui/") {
+    name := filepath.base(path)
+    parts := strings.split(name, ".")
+    if len(parts) == 3 && len(parts[1]) == 10 && is_hex(parts[1]) { return "public, max-age=31536000, immutable" }
+  }
+  return "no-cache"
+}
+
 let page_fn: fn(*http.Request) -> str = nil
 
 fn handle(req: *http.Request, res: *http.Response) {
@@ -71,7 +91,7 @@ fn handle(req: *http.Request, res: *http.Response) {
     if fs.is_file(f) {
       data, _ := fs.read_file(f)
       res.set_header("Content-Type", content_type(f))
-      res.set_header("Cache-Control", "no-cache")
+      res.set_header("Cache-Control", cache_control(clean))
       res.write(data)
       return
     }

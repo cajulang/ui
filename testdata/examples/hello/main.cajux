@@ -1,0 +1,30 @@
+# The app build_test.caju builds with caju-ui build: it uses the browser APIs of 0.5 (storage,
+# environment, document), so the build also checks that they compile for the wasm target.
+import ui "../../../ui"
+
+fn App() -> *ui.Node {
+  theme := ui.use_str("light")
+  count := ui.use_int(0)
+  ui.use_effect(fn() -> fn() {
+    ui.storage_get("hello:count", fn(v: str, found: bool) {
+      if found { count.set(len(v)) }
+    })
+    ui.env(fn(e: *ui.Env) {
+      theme.set(e.color_scheme)
+      if len(e.languages) > 0 { ui.set_document(e.languages[0], "Hello") }
+    })
+    ui.set_meta("description", "a test app")
+    return ui.on_color_scheme(fn(s: str) { theme.set(s) })
+  }, []any{})
+  return (
+    <main class={theme.v}>
+      <button onClick={fn() {
+        count.set(count.v + 1)
+        ui.storage_set("hello:count", str(count.v))
+      }}>clicked {count.v} times</button>
+      <button onClick={fn() { ui.storage_remove("hello:count") }}>forget</button>
+    </main>
+  )
+}
+
+ui.mount("#app", <App />)

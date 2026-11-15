@@ -20,11 +20,12 @@ import "std/json"
 import "std/strings"
 import "std/strconv"
 import "std/net"
+import "std/crypto"
 import filepath "std/path"
 import "../jsx"
 import "./assets"
 
-const VERSION = "0.4.1"
+const VERSION = "0.5.0"
 const WORK = ".ui"
 
 # ---------------------------------------------------------------------------------------------
@@ -155,8 +156,34 @@ fn content_type(p: str) -> str {
   return "application/octet-stream"
 }
 
-# index.html (the app's own, or a default one) with the runtime's scripts
-fn index_html(dir: str, cfg: str, base: str) -> str {
+# a value inside an HTML attribute ("...")
+fn attr_escape(s: str) -> str {
+  s = strings.replace_all(s, "&", "&amp;")
+  s = strings.replace_all(s, "\"", "&quot;")
+  return strings.replace_all(s, "<", "&lt;")
+}
+
+# the runtime's settings for the page
+struct PageCfg {
+  ui_js: str          # the URL of ui.js
+  wasm: str           # of the program
+  worker: str         # of worker.js
+  dev: bool
+  v: int              # dev: the version the page starts from
+  sid: str            # dev: the server's session
+}
+
+# the tag that loads the page runtime: its settings are data-* attributes (no inline script, so a
+# Content-Security-Policy with script-src 'self' allows the page). ui.page puts the server's
+# state and data before it (id="__ui_runtime")
+fn runtime_tag(c: *PageCfg) -> str {
+  t := "<script id=\"__ui_runtime\" src=\"" + attr_escape(c.ui_js) + "\" data-wasm=\"" + attr_escape(c.wasm) + "\" data-worker=\"" + attr_escape(c.worker) + "\""
+  if c.dev { t += " data-dev=\"1\" data-v=\"" + str(c.v) + "\" data-sid=\"" + attr_escape(c.sid) + "\"" }
+  return t + " defer></script>\n"
+}
+
+# index.html (the app's own, or a default one) with the runtime's script
+fn index_html(dir: str, c: *PageCfg, base: str) -> str {
   page := ""
   own, err := fs.read_file(filepath.join(dir, "index.html"))
   if err == nil {
@@ -172,7 +199,7 @@ fn index_html(dir: str, cfg: str, base: str) -> str {
     title := filepath.base(os.getwd())
     page = "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>" + title + "</title>\n" + links + "</head>\n<body>\n  <div id=\"app\"></div>\n</body>\n</html>\n"
   }
-  scripts := "<script>window.__UI__ = " + cfg + "</script>\n<script src=\"" + base + "__ui/ui.js\" defer></script>\n"
+  scripts := runtime_tag(c)
   i := strings.last_index(page, "</body>")
   if i < 0 { return page + scripts }
   return page[0:i] + scripts + page[i:]
@@ -335,8 +362,8 @@ fn (d: *Dev) poll(req: *http.Request, res: *http.Response) {
 
 # the dev page: index.html with the runtime's scripts and the dev settings
 fn (d: *Dev) page_template() -> str {
-  cfg, _ := json.marshal(map[str]any{"dev": true, "v": d.version, "sid": d.sid, "wasm": "/__ui/app.wasm", "worker": "/__ui/worker.js"})
-  return index_html(d.dir, cfg, "/")
+  c := &PageCfg{ui_js: "/__ui/ui.js", wasm: "/__ui/app.wasm", worker: "/__ui/worker.js", dev: true, v: d.version, sid: d.sid}
+  return index_html(d.dir, c, "/")
 }
 
 fn (d: *Dev) stop_server() {
@@ -445,18 +472,107 @@ fn cmd_dev(m: *cli.Match) {
 # ---------------------------------------------------------------------------------------------
 # caju-ui build / preview / gen / new
 
+# the first 10 hex digits of the SHA-256 of data: the part of a file's name that changes with it
+fn content_hash(data: str) -> str { return crypto.sha256_hex(data)[0:10] }
+
+# name.ext -> name.<hash>.ext
+fn hashed_name(name: str, data: str) -> str {
+  ext := filepath.ext(name)
+  return strings.trim_suffix(name, ext) + "." + content_hash(data) + ext
+}
+
+# the runtime's files in a build: (ui.js, worker.js, caju-host.mjs) names under __ui/ and their
+# contents; with hash, the names carry their content's hash (the worker imports the host by its
+# hashed name, so its own hash changes with it)
+fn runtime_files(hash: bool) -> ([]str, []str) {
+  host := "caju-host.mjs"
+  worker_js := assets.WORKER_JS
+  if hash {
+    host = hashed_name(host, assets.HOST_JS)
+    worker_js = strings.replace_all(worker_js, "from \"./caju-host.mjs\"", "from \"./" + host + "\"")
+  }
+  names := []str{"ui.js", "worker.js", host}
+  if hash {
+    names[0] = hashed_name("ui.js", assets.UI_JS)
+    names[1] = hashed_name("worker.js", worker_js)
+  }
+  return names, []str{assets.UI_JS, worker_js, assets.HOST_JS}
+}
+
+# a file of the runtime from an earlier build (any name caju-ui build gives them)
+fn runtime_leftover(name: str) -> bool {
+  for _, p := range []str{"app.", "ui.", "worker.", "caju-host."} {
+    if strings.has_prefix(name, p) {
+      ext := filepath.ext(name)
+      if ext == ".wasm" || ext == ".js" || ext == ".mjs" { return true }
+    }
+  }
+  return false
+}
+
+const HEADERS_MARK = "# Written by caju-ui build. Delete this line to keep your own version (caju-ui build then leaves the file as it is).\n"
+
+const OLD_HEADERS = "/*\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n"
+
+const OLD_VERCEL = "{\n  \"headers\": [{\n    \"source\": \"/(.*)\",\n    \"headers\": [\n      { \"key\": \"Cross-Origin-Opener-Policy\", \"value\": \"same-origin\" },\n      { \"key\": \"Cross-Origin-Embedder-Policy\", \"value\": \"require-corp\" }\n    ]\n  }]\n}\n"
+
+# _headers (Netlify, Cloudflare Pages): cross-origin isolation for every path and, with hashed
+# names, the runtime cached for a year (index.html is revalidated: it names the current files)
+fn headers_file(base: str, hash: bool) -> str {
+  out := HEADERS_MARK + "/*\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n  Cross-Origin-Resource-Policy: same-origin\n"
+  if hash { out += base + "__ui/*\n  Cache-Control: public, max-age=31536000, immutable\n" }
+  return out
+}
+
+fn vercel_file(base: str, hash: bool) -> str {
+  iso := "    {\n      \"source\": \"/(.*)\",\n      \"headers\": [\n        { \"key\": \"Cross-Origin-Opener-Policy\", \"value\": \"same-origin\" },\n        { \"key\": \"Cross-Origin-Embedder-Policy\", \"value\": \"require-corp\" },\n        { \"key\": \"Cross-Origin-Resource-Policy\", \"value\": \"same-origin\" }\n      ]\n    }"
+  if hash {
+    iso += ",\n    {\n      \"source\": \"" + base + "__ui/(.*)\",\n      \"headers\": [\n        { \"key\": \"Cache-Control\", \"value\": \"public, max-age=31536000, immutable\" }\n      ]\n    }"
+  }
+  return "{\n  \"headers\": [\n" + iso + "\n  ]\n}\n"
+}
+
+# writes a host's settings file unless the app has its own there (from public/, or put in the
+# output by hand); files an earlier caju-ui build wrote are replaced
+fn write_host_file(path: str, content: str, generated: []str) -> bool {
+  old, err := fs.read_file(path)
+  if err == nil {
+    ours := strings.has_prefix(old, HEADERS_MARK)
+    for _, g := range generated {
+      if old == g { ours = true }
+    }
+    if !ours { return false }
+  }
+  fs.write_file(path, content, 420)
+  return true
+}
+
 fn cmd_build(m: *cli.Match) {
   dir := os.getwd()
   entry := entry_of(m.arg("entry"))
   if entry == "" { die("no main.cajux or main.caju here (or give the entry file)") }
   out := m.str("out")
-  fs.mkdir_all(filepath.join(out, "__ui"), 493)
+  hash := !m.bool("no-hash")
+  rt := filepath.join(out, "__ui")
+  fs.mkdir_all(rt, 493)
+  # the runtime's files from earlier builds (their names change with their content)
+  old, _ := fs.list_dir(rt)
+  for _, n := range old {
+    if runtime_leftover(n) { fs.remove(filepath.join(rt, n)) }
+  }
   t0 := os.nanotime()
-  err := build_wasm(dir, entry, filepath.join(out, "__ui/app.wasm"))
+  wasm_tmp := filepath.join(dir, WORK + "/build.wasm")
+  fs.mkdir_all(filepath.join(dir, WORK), 493)
+  err := build_wasm(dir, entry, wasm_tmp)
   if err != "" { die("build failed\n" + err) }
-  fs.write_file(filepath.join(out, "__ui/ui.js"), assets.UI_JS, 420)
-  fs.write_file(filepath.join(out, "__ui/worker.js"), assets.WORKER_JS, 420)
-  fs.write_file(filepath.join(out, "__ui/caju-host.mjs"), assets.HOST_JS, 420)
+  wasm, rerr := fs.read_file(wasm_tmp)
+  if rerr != nil { die(rerr.Error()) }
+  fs.remove(wasm_tmp)
+  wasm_name := "app.wasm"
+  if hash { wasm_name = hashed_name(wasm_name, wasm) }
+  fs.write_file(filepath.join(rt, wasm_name), wasm, 420)
+  names, contents := runtime_files(hash)
+  for i, n := range names { fs.write_file(filepath.join(rt, n), contents[i], 420) }
   # the files of public/ go to the root of the site
   if fs.is_dir("public") {
     for _, f := range files("public") {
@@ -467,13 +583,19 @@ fn cmd_build(m: *cli.Match) {
   # absolute paths, so pages at any depth (/en/docs) find the runtime; --base for a subpath
   base := m.str("base")
   if !strings.has_suffix(base, "/") { base = base + "/" }
-  cfg, _ := json.marshal(map[str]any{"dev": false, "wasm": base + "__ui/app.wasm", "worker": base + "__ui/worker.js"})
-  fs.write_file(filepath.join(out, "index.html"), index_html(dir, cfg, base), 420)
-  # the headers the page needs (SharedArrayBuffer), for hosts that read these files
-  fs.write_file(filepath.join(out, "_headers"), "/*\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n", 420)
-  fs.write_file(filepath.join(out, "vercel.json"), "{\n  \"headers\": [{\n    \"source\": \"/(.*)\",\n    \"headers\": [\n      { \"key\": \"Cross-Origin-Opener-Policy\", \"value\": \"same-origin\" },\n      { \"key\": \"Cross-Origin-Embedder-Policy\", \"value\": \"require-corp\" }\n    ]\n  }]\n}\n", 420)
-  st, _ := fs.stat(filepath.join(out, "__ui/app.wasm"))
-  print("built " + out + "/ in " + str((os.nanotime() - t0) / 1000000) + " ms (app.wasm: " + str(st.size / 1024) + " KB)")
+  c := &PageCfg{ui_js: base + "__ui/" + names[0], wasm: base + "__ui/" + wasm_name, worker: base + "__ui/" + names[1]}
+  fs.write_file(filepath.join(out, "index.html"), index_html(dir, c, base), 420)
+  # the headers the page needs (SharedArrayBuffer), for hosts that read these files; an app's
+  # own _headers or vercel.json stays (and --no-headers writes neither)
+  if !m.bool("no-headers") {
+    if !write_host_file(filepath.join(out, "_headers"), headers_file(base, hash), []str{OLD_HEADERS, headers_file(base, true), headers_file(base, false)}) {
+      print("kept " + out + "/_headers (not written by caju-ui)")
+    }
+    if !write_host_file(filepath.join(out, "vercel.json"), vercel_file(base, hash), []str{OLD_VERCEL, vercel_file(base, true), vercel_file(base, false)}) {
+      print("kept " + out + "/vercel.json (not written by caju-ui)")
+    }
+  }
+  print("built " + out + "/ in " + str((os.nanotime() - t0) / 1000000) + " ms (" + wasm_name + ": " + str(len(wasm) / 1024) + " KB)")
   ssr := m.str("ssr")
   if ssr != "" {
     bin := filepath.stem(ssr)
@@ -543,6 +665,8 @@ build_cmd.arg_opt("entry", "the entry file (default: main.cajux)")
 build_cmd.flag_str("out", "o", "dir", "dist", "the output directory")
 build_cmd.flag_str("ssr", "", "file", "", "also compile this server program (native)")
 build_cmd.flag_str("base", "", "path", "/", "the path the site is served under")
+build_cmd.flag_bool("no-hash", "", "name the runtime's files app.wasm, worker.js... instead of app.<hash>.wasm")
+build_cmd.flag_bool("no-headers", "", "write no _headers and vercel.json (the host's headers are the app's own)")
 build_cmd.action(cmd_build)
 
 preview_cmd := app.sub("preview", "serve a build")
