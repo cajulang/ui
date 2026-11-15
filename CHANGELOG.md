@@ -7,6 +7,44 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-15
+
+### Added
+
+- The browser's storage: `ui.storage_get(key, fn(value: str, found: bool))`, `ui.storage_set(key,
+  value)` and `ui.storage_remove(key)`, over `localStorage` (raw keys: prefix them with the app's
+  name), with the built-in page functions `ui.storage.get`, `ui.storage.set` and
+  `ui.storage.remove`. Storage that is unavailable or throws (private mode, blocked site data)
+  reads as not found and writes nothing; on the server, `storage_get` calls back with
+  `("", false)` and the others do nothing.
+- The browser's environment: `ui.env(fn(e: *ui.Env))` with `Env{languages, color_scheme, url,
+  user_agent}` (page function `ui.env`), the page events `ui.env.color_scheme` (when
+  `prefers-color-scheme` changes) and `ui.env.languages` (on `languagechange`), and
+  `ui.on_color_scheme(f)`, which listens to the first.
+- The document: `ui.set_document(lang, title)` (`<html lang>` and `document.title`) and
+  `ui.set_meta(name, content)`, with the page functions `ui.document` and `ui.meta`.
+- `caju-ui build --no-headers`: writes no `_headers` and `vercel.json`. `caju-ui build --no-hash`:
+  the runtime's files keep their plain names.
+- `ssr.cache_control(path)`; `ssr.serve` caches the build's hashed files for a year
+  (`immutable`) and revalidates everything else.
+- `tools/page-check.mjs` (node check of the new page functions, including storage that throws)
+  and `build_test.caju` (runs `caju-ui build` on `testdata/examples/hello`).
+
+### Changed
+
+- `caju-ui build` writes no inline script, so the page works under a Content-Security-Policy with
+  `script-src 'self'`: the runtime's settings are `data-*` attributes of its tag
+  (`<script id="__ui_runtime" src=... data-wasm=... data-worker=... defer>`), which `ui.js` reads
+  (a page's own `window.__UI__` still works and wins). `caju-ui dev` does the same, and `ui.page`
+  puts the server's state and data before that tag (or before the old inline script).
+- `caju-ui build` names the runtime's files by their content: `__ui/app.<hash>.wasm`,
+  `worker.<hash>.js`, `caju-host.<hash>.mjs` and `ui.<hash>.js` (`<hash>`: 10 hex digits of the
+  SHA-256), so they can be cached for good; the `_headers` and `vercel.json` it writes say so
+  (`Cache-Control: public, max-age=31536000, immutable` for `/__ui/*`) and add
+  `Cross-Origin-Resource-Policy: same-origin`. The runtime files of earlier builds are removed.
+- `caju-ui build` no longer overwrites an `_headers` or `vercel.json` it did not write (from
+  `public/`, or put in the output by hand).
+
 ## [0.4.1] - 2026-11-15
 
 ### Changed
@@ -105,7 +143,9 @@ All notable changes to this project are documented here. The format follows
 - `caju-ui build` copies `public/` into the build (it copied nothing when the output existed).
 - `caju-ui build --ssr` and `dev --ssr` replace a running server binary ("text file busy").
 
-[Unreleased]: https://github.com/cajulang/ui/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cajulang/ui/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cajulang/ui/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/cajulang/ui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cajulang/ui/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cajulang/ui/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cajulang/ui/compare/v0.1.0...v0.2.0
