@@ -4,7 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/).
 
+
 ## [Unreleased]
+
+## [0.4.1] - 2026-11-15
+
+### Changed
+- Requires caju 0.9.0: the `caju-ui` command waits with `os.sleep`, now that `sleep` is no longer
+  part of the language.
 
 ## [0.4.0] - 2026-11-15
 

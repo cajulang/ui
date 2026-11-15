@@ -24,7 +24,7 @@ import filepath "std/path"
 import "../jsx"
 import "./assets"
 
-const VERSION = "0.3.0"
+const VERSION = "0.4.1"
 const WORK = ".ui"
 
 # ---------------------------------------------------------------------------------------------
@@ -366,7 +366,7 @@ fn (d: *Dev) render_page(target: str) -> (int, str, str) {
     r, err := http.request(&http.ClientRequest{url: url, headers: map[str]str{"Connection": "close"}, no_redirects: true, timeout_ms: 30000})
     if err == nil { return r.status, r.body, "" }
     if !strings.contains(err.Error(), "connection refused") { return 0, "", "the app's server: " + err.Error() }
-    sleep(0.1)
+    os.sleep(0.1)
   }
   log, _ := fs.read_file(filepath.join(d.dir, WORK + "/server.log"))
   return 0, "", "the app's server (" + d.ssr + ") is not answering on port " + str(d.ssr_port) + "\n" + log

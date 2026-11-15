@@ -1,8 +1,8 @@
 [package]
 name = "github.com/cajulang/ui"
-version = "0.4.0"
+version = "0.4.1"
 description = "A React-style UI library for Caju: JSX-like components rendered from WebAssembly, with hot reload"
 license = "MIT"
 authors = ["Aécio"]
 entry = "ui.caju"
-caju = "0.6.0"
+caju = "0.9.0"
